@@ -90,7 +90,8 @@ function demo_box()
     end
     reg2 = Nas2Step.VolumeRegion("Region_2", all_pts, tets2)
 
-    out = Nas2Step.write_nas_volume("demo_box.nas", [reg1, reg2])
+    output_path = "$(@__DIR__)/demo_box.nas"
+    out = Nas2Step.write_nas_volume(output_path, [reg1, reg2])
     println("Wrote $out with $(length(tets1) + length(tets2)) tetrahedra")
     println("  Region 1: $(length(tets1)) tetrahedra")
     println("  Region 2: $(length(tets2)) tetrahedra")
