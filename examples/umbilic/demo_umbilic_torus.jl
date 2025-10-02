@@ -102,7 +102,7 @@ function demo_umbilic_torus(; u_res=60, v_res=40, mesh_size=0.5, output="demo_um
     
     # Initialize gmsh
     gmsh.initialize()
-    gmsh.option.setNumber("General.Terminal", 1)
+    gmsh.option.setNumber("General.Terminal", 0)  # 0=silent, 1=errors, 2=warnings, 3=info
     gmsh.model.add("umbilic_torus")
     
     try
