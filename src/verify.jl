@@ -347,6 +347,224 @@ function test_node_swap_fix(filename; swap_pair::Tuple{Int,Int}=(1,2))
 end
 
 
+# Simple JSON writer (no external deps)
+function write_json(io::IO, obj, indent::Int)
+    ind = "  " ^ indent
+    if obj isa Dict
+        println(io, "{")
+        keys_list = collect(keys(obj))
+        for (i, k) in enumerate(keys_list)
+            print(io, ind, "  \"", k, "\": ")
+            write_json(io, obj[k], indent + 1)
+            println(io, i < length(keys_list) ? "," : "")
+        end
+        print(io, ind, "}")
+    elseif obj isa AbstractVector
+        println(io, "[")
+        for (i, v) in enumerate(obj)
+            print(io, ind, "  ")
+            write_json(io, v, indent + 1)
+            println(io, i < length(obj) ? "," : "")
+        end
+        print(io, ind, "]")
+    elseif obj isa AbstractString
+        print(io, "\"", obj, "\"")
+    elseif obj isa Number
+        print(io, obj)
+    elseif obj isa Bool
+        print(io, obj ? "true" : "false")
+    elseif obj === nothing
+        print(io, "null")
+    else
+        print(io, "\"", string(obj), "\"")
+    end
+end
+
+"""
+    export_mesh_quality_json(verification_result, output_file="mesh_quality.json"; 
+                            include_anomalies_from=nothing)
+
+Export comprehensive mesh quality verification results to JSON.
+Includes volume checks, quality metrics, coordination numbers, and closure status.
+
+Optional:
+- include_anomalies_from: Path to *_anomalies.json file from nas_to_step conversion to merge
+"""
+function export_mesh_quality_json(verification_result, output_file="mesh_quality.json";
+                                  include_anomalies_from::Union{Nothing,AbstractString}=nothing)
+    # Build JSON structure
+    report = Dict(
+        "overall_status" => String(verification_result.overall_status),
+        "volume_check" => Dict(
+            "total_elements" => verification_result.volume_check.total_elements,
+            "inverted_count" => verification_result.volume_check.inverted_count,
+            "zero_volume_count" => verification_result.volume_check.zero_volume_count,
+            "min_volume" => verification_result.volume_check.min_volume,
+            "max_volume" => verification_result.volume_check.max_volume,
+            "convention_mismatch" => verification_result.volume_check.convention_mismatch,
+            "status" => String(verification_result.volume_check.status)
+        ),
+        "quality_check" => Dict(
+            "min" => verification_result.quality_check.min,
+            "max" => verification_result.quality_check.max,
+            "mean" => verification_result.quality_check.mean,
+            "median" => verification_result.quality_check.median,
+            "poor_count" => verification_result.quality_check.poor_count,
+            "bad_count" => verification_result.quality_check.bad_count,
+            "status" => String(verification_result.quality_check.status)
+        ),
+        "coordination_check" => Dict(
+            "total_vertices" => verification_result.coordination_check.total_vertices,
+            "mean_coordination" => verification_result.coordination_check.mean_coordination,
+            "median_coordination" => verification_result.coordination_check.median_coordination,
+            "p90_coordination" => verification_result.coordination_check.p90_coordination,
+            "p95_coordination" => verification_result.coordination_check.p95_coordination,
+            "p99_coordination" => verification_result.coordination_check.p99_coordination,
+            "min_coord_threshold" => verification_result.coordination_check.min_coord,
+            "max_coord_threshold" => verification_result.coordination_check.max_coord_threshold,
+            "overcoord_percentile" => verification_result.coordination_check.overcoord_percentile,
+            "undercoordinated_count" => length(verification_result.coordination_check.undercoordinated),
+            "overcoordinated_count" => length(verification_result.coordination_check.overcoordinated),
+            "undercoordinated_vertices" => [Dict("vertex_id" => v[1], "coordination" => v[2]) 
+                                            for v in verification_result.coordination_check.undercoordinated],
+            "overcoordinated_vertices" => [Dict("vertex_id" => v[1], "coordination" => v[2]) 
+                                           for v in verification_result.coordination_check.overcoordinated],
+            "status" => String(verification_result.coordination_check.status)
+        ),
+        "closure_check" => Dict(
+            "is_closed" => verification_result.closure_check.is_closed,
+            "boundary_edge_count" => verification_result.closure_check.boundary_edge_count,
+            "surface_count" => verification_result.closure_check.surface_count,
+            "status" => String(verification_result.closure_check.status)
+        )
+    )
+    
+    # Add swap test if present
+    if verification_result.swap_test !== nothing
+        report["swap_test"] = Dict(
+            "original_inverted" => verification_result.swap_test.original_inverted,
+            "swapped_inverted" => verification_result.swap_test.swapped_inverted,
+            "would_fix" => verification_result.swap_test.would_fix
+        )
+    end
+    
+    # Merge anomalies from conversion if provided
+    if include_anomalies_from !== nothing && isfile(include_anomalies_from)
+        try
+            anomaly_content = read(include_anomalies_from, String)
+            # Simple parse to extract anomalies array
+            if occursin("\"anomalies\":", anomaly_content)
+                report["conversion_anomalies_file"] = include_anomalies_from
+                report["conversion_anomalies_note"] = "Manifoldness issues from NAS to STEP conversion (see separate file for details)"
+            end
+        catch e
+            @warn "Could not read anomaly file: $include_anomalies_from"
+        end
+    end
+    
+    # Write to file (simple JSON without external deps)
+    open(output_file, "w") do io
+        write_json(io, report, 0)
+    end
+    
+    println("Mesh quality report exported to: $output_file")
+    return output_file
+end
+
+
+"""
+    comprehensive_mesh_check(nas_file; output_json="mesh_quality_report.json", 
+                            run_conversion=false, step_output=nothing, verbose=true)
+
+Run all mesh quality checks and optionally test STEP conversion.
+Exports unified JSON report including all quality metrics.
+
+Arguments:
+- nas_file: Input NAS mesh file
+- output_json: Output JSON report file (default: "mesh_quality_report.json")
+- run_conversion: Also run NAS to STEP conversion and include anomalies (default: false)
+- step_output: STEP output path if run_conversion=true (default: auto-generate)
+- verbose: Print detailed results (default: true)
+
+Returns named tuple with verification results and JSON path.
+"""
+function comprehensive_mesh_check(nas_file::AbstractString; 
+                                 output_json::AbstractString="mesh_quality_report.json",
+                                 run_conversion::Bool=false,
+                                 step_output::Union{Nothing,AbstractString}=nothing,
+                                 verbose::Bool=true)
+    
+    if !isfile(nas_file)
+        error("NAS file not found: $nas_file")
+    end
+    
+    if verbose
+        println("\n" * "="^70)
+        println("COMPREHENSIVE MESH QUALITY CHECK")
+        println("="^70)
+        println("File: $nas_file")
+        println("="^70)
+    end
+    
+    # Run mesh verification
+    verification = verify_nas_mesh(nas_file, verbose=verbose)
+    
+    anomaly_file = nothing
+    
+    # Optionally run conversion
+    if run_conversion
+        if verbose
+            println("\n" * "="^70)
+            println("TESTING NAS TO STEP CONVERSION")
+            println("="^70)
+        end
+        
+        step_path = step_output === nothing ? replace(nas_file, ".nas" => "_quality_test.step") : step_output
+        anomaly_file = replace(step_path, ".step" => "_anomalies.json")
+        
+        try
+            nas_to_step(nas_file, step_path=step_path, emit_anomaly_json=true, 
+                       anomaly_json_path=anomaly_file)
+            if verbose
+                println("\n✓ Conversion successful: $step_path")
+                if isfile(anomaly_file)
+                    println("  Anomaly report: $anomaly_file")
+                end
+            end
+        catch e
+            if verbose
+                println("\n⚠️  Conversion failed: $e")
+            end
+            anomaly_file = nothing
+        end
+    end
+    
+    # Export unified JSON report
+    if verbose
+        println("\n" * "="^70)
+        println("EXPORTING UNIFIED REPORT")
+        println("="^70)
+    end
+    
+    export_mesh_quality_json(verification, output_json, include_anomalies_from=anomaly_file)
+    
+    if verbose
+        println("\n" * "="^70)
+        println("CHECK COMPLETE")
+        println("="^70)
+        println("Overall Status: ", 
+                verification.overall_status == :ok ? "✓ PASSED" :
+                verification.overall_status == :convention_mismatch ? "🔄 CONVENTION MISMATCH" :
+                verification.overall_status == :warning ? "⚠️  WARNING" :
+                "❌ FAILED")
+        println("Full report: $output_json")
+        println("="^70)
+    end
+    
+    return (verification=verification, json_path=output_json, anomaly_path=anomaly_file)
+end
+
+
 """
     export_inverted_elements(inverted_elements, output_file="inverted_elements.txt")
 
@@ -444,6 +662,150 @@ end
 
 
 """
+    check_vertex_coordination(filename; min_coord=3, overcoord_percentile=95)
+
+Check vertex coordination numbers (number of elements connected to each vertex).
+Identify anomalous vertices with too few or too many connections.
+
+Arguments:
+- `min_coord`: minimum acceptable coordination number (default: 3)
+- `overcoord_percentile`: percentile threshold for overcoordination (default: 90)
+  Vertices with coordination > this percentile are flagged as overcoordinated
+
+Returns a named tuple with:
+- total_vertices: total number of unique vertices
+- coordination_numbers: Dict mapping vertex_id => coordination_number
+- undercoordinated: array of vertices with coordination < min_coord
+- overcoordinated: array of vertices with coordination > percentile threshold
+- coord_distribution: Dict mapping coordination_number => count
+- mean_coordination: average coordination number
+- median_coordination: median coordination number
+- p90_coordination: 90th percentile coordination
+- max_coord_threshold: computed threshold for overcoordination
+- status: :ok, :warning, or :error
+"""
+function check_vertex_coordination(filename; min_coord::Int=3, overcoord_percentile::Real=95)
+    gmsh.initialize()
+    gmsh.option.setNumber("General.Terminal", 0)
+    
+    result = (total_vertices=0, coordination_numbers=Dict{Int,Int}(),
+             undercoordinated=[], overcoordinated=[],
+             coord_distribution=Dict{Int,Int}(),
+             mean_coordination=NaN, median_coordination=NaN,
+             status=:error)
+    
+    try
+        gmsh.open(filename)
+        
+        # Get all tetrahedral elements
+        elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(3, -1)
+        
+        if length(elem_types) == 0
+            return result
+        end
+        
+        # Build vertex coordination map: vertex_id => count of connected elements
+        vertex_coord = Dict{Int,Int}()
+        
+        for (etype, etags, node_tags) in zip(elem_types, elem_tags, elem_node_tags)
+            if etype == 4  # Tetrahedra
+                nodes_per_tet = 4
+                num_tets = length(etags)
+                
+                # Count element connections for each vertex
+                for i in 1:num_tets
+                    base = (i-1) * nodes_per_tet
+                    for j in 1:nodes_per_tet
+                        node_id = Int(node_tags[base + j])
+                        vertex_coord[node_id] = get(vertex_coord, node_id, 0) + 1
+                    end
+                end
+            end
+        end
+        
+        # Analyze coordination numbers
+        total_vertices = length(vertex_coord)
+        
+        if total_vertices == 0
+            return result
+        end
+        
+        # Find undercoordinated vertices
+        undercoordinated = Tuple{Int,Int}[]  # (vertex_id, coord_num)
+        overcoordinated = Tuple{Int,Int}[]
+        
+        for (vid, coord) in vertex_coord
+            if coord < min_coord
+                push!(undercoordinated, (vid, coord))
+            end
+        end
+        
+        # Sort undercoordinated by coordination number (most problematic first)
+        sort!(undercoordinated, by = x -> x[2])
+        
+        # Build coordination distribution histogram
+        coord_distribution = Dict{Int,Int}()
+        for coord in values(vertex_coord)
+            coord_distribution[coord] = get(coord_distribution, coord, 0) + 1
+        end
+        
+        # Calculate statistics
+        coord_values = collect(values(vertex_coord))
+        mean_coord = mean(coord_values)
+        median_coord = median(coord_values)
+        
+        # Calculate percentile threshold for overcoordination
+        # quantile is already available from Statistics module imported at top
+        max_coord_threshold = quantile(coord_values, overcoord_percentile / 100.0)
+        p90_coord = quantile(coord_values, 0.90)
+        p95_coord = quantile(coord_values, 0.95)
+        p99_coord = quantile(coord_values, 0.99)
+        
+        # Find overcoordinated vertices based on percentile
+        for (vid, coord) in vertex_coord
+            if coord > max_coord_threshold && coord >= min_coord
+                push!(overcoordinated, (vid, coord))
+            end
+        end
+        
+        # Sort by coordination number (most problematic first)
+        sort!(overcoordinated, by = x -> x[2], rev=true)
+        
+        # Determine status
+        status = if !isempty(undercoordinated)
+            :error  # Undercoordinated vertices are serious
+        elseif !isempty(overcoordinated)
+            :warning  # Overcoordinated might be acceptable
+        else
+            :ok
+        end
+        
+        result = (
+            total_vertices=total_vertices,
+            coordination_numbers=vertex_coord,
+            undercoordinated=undercoordinated,
+            overcoordinated=overcoordinated,
+            coord_distribution=coord_distribution,
+            mean_coordination=mean_coord,
+            median_coordination=median_coord,
+            p90_coordination=p90_coord,
+            p95_coordination=p95_coord,
+            p99_coordination=p99_coord,
+            min_coord=min_coord,
+            max_coord_threshold=ceil(Int, max_coord_threshold),
+            overcoord_percentile=overcoord_percentile,
+            status=status
+        )
+        
+    finally
+        gmsh.finalize()
+    end
+    
+    return result
+end
+
+
+"""
     verify_nas_mesh(filename; verbose=true)
 
 Comprehensive verification of a NAS mesh file.
@@ -452,6 +814,7 @@ Checks for:
 1. Inverted/negative volume elements (twists)
 2. Element quality metrics
 3. Surface closure
+4. Vertex coordination numbers
 
 Returns a named tuple with all check results and an overall status.
 """
@@ -523,13 +886,36 @@ function verify_nas_mesh(filename; verbose=true)
         println()
     end
     
+    # Check vertex coordination numbers
+    verbose && println("Checking vertex coordination...")
+    coord_check = check_vertex_coordination(filename)
+    
+    if verbose
+        under_count = length(coord_check.undercoordinated)
+        over_count = length(coord_check.overcoordinated)
+
+        println("  Vertices: $(coord_check.total_vertices), mean=$(round(coord_check.mean_coordination, digits=1)), p95=$(round(coord_check.p95_coordination, digits=1)), p99=$(round(coord_check.p99_coordination, digits=1))")
+
+        if coord_check.status == :ok
+            println("  ✓ OK")
+        else
+            if under_count > 0
+                println("  ⚠️  $(under_count) undercoordinated (<$(coord_check.min_coord))")
+            end
+            if over_count > 0
+                println("  ⚠️  $(over_count) overcoordinated (>p$(Int(coord_check.overcoord_percentile))=$(coord_check.max_coord_threshold))")
+            end
+        end
+        println()
+    end
+    
     # Determine overall status
     overall_status = :ok
-    if vol_check.status == :error || qual_check.status == :error || closure_check.status == :error
+    if vol_check.status == :error || qual_check.status == :error || closure_check.status == :error || coord_check.status == :error
         overall_status = :error
     elseif vol_check.status == :convention_mismatch
         overall_status = :convention_mismatch
-    elseif qual_check.status == :warning || vol_check.status == :warning
+    elseif qual_check.status == :warning || vol_check.status == :warning || coord_check.status == :warning
         overall_status = :warning
     end
     
@@ -547,6 +933,7 @@ function verify_nas_mesh(filename; verbose=true)
         volume_check=vol_check,
         quality_check=qual_check,
         closure_check=closure_check,
+        coordination_check=coord_check,
         swap_test=swap_test_result,
         overall_status=overall_status
     )
