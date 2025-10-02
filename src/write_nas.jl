@@ -1,0 +1,316 @@
+# A surface region with its own local points/triangles and thickness
+struct SurfaceRegion
+    name::String
+    points::Vector{NTuple{3,Float64}}      # local points [(x,y,z), ...]
+    triangles::Vector{NTuple{3,Int}}       # 1-based indices into points [(i,j,k), ...]
+    thickness::Float64                     # PSHELL thickness
+end
+
+# A volume region with its own local points/tetrahedra
+struct VolumeRegion
+    name::String
+    points::Vector{NTuple{3,Float64}}      # local points [(x,y,z), ...]
+    tetrahedra::Vector{NTuple{4,Int}}      # 1-based indices into points [(i,j,k,l), ...]
+end
+
+
+# Internal: free-field card builder
+function card(name::AbstractString, fields...; comment::Union{Nothing,String}=nothing)
+    s = String(name)
+    if !isempty(fields)
+        s *= "," * join(string.(fields), ",")
+    end
+    if comment !== nothing && !isempty(comment)
+        s *= "  \$" * " " * comment
+    end
+    return s
+end
+
+
+# Internal: write SET1 with continuation lines
+function write_set1(io::IO, sid::Int, ids::Vector{Int})
+    # SET1,SID,ID1,ID2,... free-field; continuation lines begin with '+'
+    n = length(ids)
+    if n == 0
+        println(io, card("SET1", sid))
+        return
+    end
+    # First line: up to 14 fields typically fine; keep sane chunk size
+    chunk = 12
+    i = 1
+    first_chunk = min(chunk, n)
+    println(io, card("SET1", sid, ids[i:first_chunk]...))
+    i = first_chunk + 1
+    while i <= n
+        j = min(i + chunk - 1, n)
+        # Continuation: '+' in first field
+        println(io, card("+", ids[i:j]...))
+        i = j + 1
+    end
+end
+
+
+# Internal: tolerance-based dedup key
+@inline function key3(p::NTuple{3,Float64}, invtol::Float64)
+    return (round(Int, p[1] * invtol), round(Int, p[2] * invtol), round(Int, p[3] * invtol))
+end
+
+
+"""
+    write_nas_surface(path::AbstractString, regions::Vector{SurfaceRegion};
+                      E::Float64=2.1e11, nu::Float64=0.3, rho::Float64=0.0,
+                      tol::Float64=1e-9,
+                      start_ids=(grid=1, eid=1, pid=1, mid=1))
+
+Write a free-field NASTRAN .nas surface mesh with CTRIA3 elements for multiple regions.
+
+- One MAT1 (MID) shared by all regions.
+- One PSHELL (PID) per region, with its thickness; elements in that region reference its PID.
+- One SET1 per region listing its element EIDs, named in a comment with the region name.
+
+Arguments:
+- `E`, `nu`, `rho`: material properties for MAT1 (G inferred from E, nu).
+- `tol`: node dedup tolerance across regions.
+- `start_ids`: starting IDs for GRID, EID, PID, MID.
+"""
+function write_nas_surface(path::AbstractString, regions::Vector{SurfaceRegion};
+    E::Float64=2.1e11, nu::Float64=0.3, rho::Float64=0.0, tol::Float64=1e-9,
+    start_ids=(grid=1, eid=1, pid=1, mid=1))
+
+    isempty(regions) && error("No regions provided")
+
+    invtol = 1 / tol
+
+    # Global node map and coordinates
+    # Dedup map: unique per region to avoid stitching regions together
+    coord2id = Dict{NTuple{4,Int},Int}()
+    nodes = Vector{Tuple{Int,NTuple{3,Float64}}}()  # (id, (x,y,z))
+    next_grid = start_ids.grid
+    next_eid = start_ids.eid
+    next_pid = start_ids.pid
+    next_mid = start_ids.mid
+
+    # Per-region data prepared for writing (pre-dedup)
+    reg_pid = Int[]
+    reg_eids = Vector{Int}[]
+    reg_tri_gids = Vector{NTuple{3,Int}}[]  # global node ids per triangle
+
+    # Dedup nodes and map region-local indices to global GRID IDs
+    for (ridx, reg) in enumerate(regions)
+        # Map local point idx -> global GRID ID
+        local2global = Vector{Int}(undef, length(reg.points))
+        for (i, p) in enumerate(reg.points)
+            # Include region index in key so shared interfaces remain disconnected
+            k3 = key3(p, invtol)
+            k = (ridx, k3[1], k3[2], k3[3])
+            gid = get(coord2id, k, 0)
+            if gid == 0
+                gid = next_grid
+                next_grid += 1
+                coord2id[k] = gid
+                push!(nodes, (gid, p))
+            end
+            local2global[i] = gid
+        end
+
+        # Register region PID and its elements
+        pid = next_pid
+        next_pid += 1
+        push!(reg_pid, pid)
+        tri_gids = NTuple{3,Int}[]
+        for tri in reg.triangles
+            g1 = local2global[tri[1]]
+            g2 = local2global[tri[2]]
+            g3 = local2global[tri[3]]
+            push!(tri_gids, (g1, g2, g3))
+        end
+        push!(reg_tri_gids, tri_gids)
+    end
+
+    # Assign element IDs per region (no cross-region triangle dedup)
+    reg_eids = Vector{Int}[]
+    next_eid = start_ids.eid
+    for tri_gids in reg_tri_gids
+        eids = collect(next_eid:(next_eid+length(tri_gids)-1))
+        next_eid += length(tri_gids)
+        push!(reg_eids, eids)
+    end
+
+    # Write file
+    open(path, "w") do io
+        # Header
+        println(io, "CEND")
+        println(io, "BEGIN BULK")
+        println(io, "\$ Generated by Nas2Step (Julia) — discrete/faceted CTRIA3 multi-region")
+
+        # GRID nodes
+        for (gid, p) in sort(nodes; by=first)
+            # GRID,ID,CP,X1,X2,X3,CD,PS,SEID  (leave CP,CD,PS,SEID blank as needed)
+            println(io, card("GRID", gid, "", p[1], p[2], p[3]))
+        end
+
+        # Material (one shared)
+        # If nu given and G omitted, solver computes G = E/(2*(1+nu))
+        mid = next_mid
+        next_mid += 1
+        println(io, card("MAT1", mid, E, "", nu, rho, "", "", "", "", "", ""))
+
+        # PSHELL per region
+        for (i, reg) in enumerate(regions)
+            pid = reg_pid[i]
+            # PSHELL,PID,MID1,T,MID2,12I/T^3,MID3,TS/T,NSM
+            println(io, card("PSHELL", pid, mid, reg.thickness, "", "", "", "", ""; comment="Region $(i): $(reg.name)"))
+        end
+
+        # Elements
+        for (i, reg) in enumerate(regions)
+            pid = reg_pid[i]
+            eids = reg_eids[i]
+            tri_gids = reg_tri_gids[i]
+            println(io, "\$ --- Elements for region $(i): $(reg.name) (PID=$(pid)) ---")
+            for (j, gtri) in enumerate(tri_gids)
+                eid = eids[j]
+                # CTRIA3,EID,PID,G1,G2,G3
+                println(io, card("CTRIA3", eid, pid, gtri[1], gtri[2], gtri[3]))
+            end
+        end
+
+        # Region sets (by EID)
+        for (i, reg) in enumerate(regions)
+            sid = 1000 + i  # arbitrary SID range for sets
+            println(io, "\$ --- SET1 for region $(i): $(reg.name) ---")
+            write_set1(io, sid, reg_eids[i])
+        end
+
+        println(io, "ENDDATA")
+    end
+
+    return path
+end
+
+
+"""
+    write_nas_volume(path::AbstractString, regions::Vector{VolumeRegion};
+                     E::Float64=2.1e11, nu::Float64=0.3, rho::Float64=0.0,
+                     tol::Float64=1e-9,
+                     start_ids=(grid=1, eid=1, pid=1, mid=1))
+
+Write a free-field NASTRAN .nas volume mesh with CTETRA elements for multiple regions.
+
+- One MAT1 (MID) shared by all regions.
+- One PSOLID (PID) per region; elements in that region reference its PID.
+- One SET1 per region listing its element EIDs, named in a comment with the region name.
+
+Arguments:
+- `E`, `nu`, `rho`: material properties for MAT1 (G inferred from E, nu).
+- `tol`: node dedup tolerance across regions.
+- `start_ids`: starting IDs for GRID, EID, PID, MID.
+"""
+function write_nas_volume(path::AbstractString, regions::Vector{VolumeRegion};
+    E::Float64=2.1e11, nu::Float64=0.3, rho::Float64=0.0, tol::Float64=1e-9,
+    start_ids=(grid=1, eid=1, pid=1, mid=1))
+
+    isempty(regions) && error("No regions provided")
+
+    invtol = 1 / tol
+
+    # Global node map and coordinates
+    # Dedup map: shared across regions to create conformal mesh at interfaces
+    coord2id = Dict{NTuple{3,Int},Int}()
+    nodes = Vector{Tuple{Int,NTuple{3,Float64}}}()  # (id, (x,y,z))
+    next_grid = start_ids.grid
+    next_eid = start_ids.eid
+    next_pid = start_ids.pid
+    next_mid = start_ids.mid
+
+    # Per-region data prepared for writing (pre-dedup)
+    reg_pid = Int[]
+    reg_eids = Vector{Int}[]
+    reg_tet_gids = Vector{NTuple{4,Int}}[]  # global node ids per tetrahedron
+
+    # Dedup nodes and map region-local indices to global GRID IDs
+    # FIXED: Share nodes at interfaces by NOT including region index in key
+    for (ridx, reg) in enumerate(regions)
+        # Map local point idx -> global GRID ID
+        local2global = Vector{Int}(undef, length(reg.points))
+        for (i, p) in enumerate(reg.points)
+            # Dedup based on coordinates only (share nodes at interfaces)
+            k = key3(p, invtol)
+            gid = get(coord2id, k, 0)
+            if gid == 0
+                gid = next_grid
+                next_grid += 1
+                coord2id[k] = gid
+                push!(nodes, (gid, p))
+            end
+            local2global[i] = gid
+        end
+
+        # Register region PID and its elements
+        pid = next_pid
+        next_pid += 1
+        push!(reg_pid, pid)
+        tet_gids = NTuple{4,Int}[]
+        for tet in reg.tetrahedra
+            g1 = local2global[tet[1]]
+            g2 = local2global[tet[2]]
+            g3 = local2global[tet[3]]
+            g4 = local2global[tet[4]]
+            push!(tet_gids, (g1, g2, g3, g4))
+        end
+        push!(reg_tet_gids, tet_gids)
+    end
+
+    # Assign element IDs per region (no cross-region tetrahedron dedup)
+    reg_eids = Vector{Int}[]
+    next_eid = start_ids.eid
+    for tet_gids in reg_tet_gids
+        eids = collect(next_eid:(next_eid+length(tet_gids)-1))
+        next_eid += length(tet_gids)
+        push!(reg_eids, eids)
+    end
+
+    # Write file
+    open(path, "w") do io
+        # Header
+        println(io, "CEND")
+        println(io, "BEGIN BULK")
+        println(io, "\$ Generated by Nas2Step (Julia) — volume CTETRA multi-region")
+
+        # GRID nodes
+        for (gid, p) in sort(nodes; by=first)
+            # GRID,ID,CP,X1,X2,X3,CD,PS,SEID  (leave CP,CD,PS,SEID blank as needed)
+            println(io, card("GRID", gid, "", p[1], p[2], p[3]))
+        end
+
+        # Material (one shared)
+        # If nu given and G omitted, solver computes G = E/(2*(1+nu))
+        mid = next_mid
+        next_mid += 1
+        println(io, card("MAT1", mid, E, "", nu, rho, "", "", "", "", "", ""))
+
+        # PSOLID per region
+        for (i, reg) in enumerate(regions)
+            pid = reg_pid[i]
+            # PSOLID,PID,MID,CORDM,IN,STRESS,ISOP,FCTN
+            println(io, card("PSOLID", pid, mid, "", "", "", "", ""; comment="Region $(i): $(reg.name)"))
+        end
+
+        # Elements
+        for (i, reg) in enumerate(regions)
+            pid = reg_pid[i]
+            eids = reg_eids[i]
+            tet_gids = reg_tet_gids[i]
+            println(io, "\$ --- Elements for region $(i): $(reg.name) (PID=$(pid)) ---")
+            for (j, gtet) in enumerate(tet_gids)
+                eid = eids[j]
+                # CTETRA,EID,PID,G1,G2,G3,G4
+                println(io, card("CTETRA", eid, pid, gtet[1], gtet[2], gtet[3], gtet[4]))
+            end
+        end
+
+        println(io, "ENDDATA")
+    end
+
+    return path
+end
