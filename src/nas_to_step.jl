@@ -588,7 +588,7 @@ function convert_nas_to_step(inpath::AbstractString; outpath::Union{Nothing,Abst
 
     gmsh.initialize()
     try
-        gmsh.option.setNumber("General.Terminal", 1)
+        gmsh.option.setNumber("General.Terminal", 0)  # 0=silent, 1=errors, 2=warnings, 3=info
         gmsh.option.setNumber("Geometry.OCCSewFaces", sewFaces ? 1 : 0)
         gmsh.option.setNumber("Geometry.Tolerance", tol)
 
