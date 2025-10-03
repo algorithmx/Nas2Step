@@ -185,7 +185,9 @@ end
 function create_face_for_tri!(n1::Int, n2::Int, n3::Int,
     occ_node_map::Dict{Int,Int}, node_map::Dict{Int,NTuple{3,Float64}},
     edge_map::Dict{Tuple{Int,Int},Int}, face_map::Dict{Tuple{Int,Int,Int},Int},
-    face_oriented_nodes::Dict{Tuple{Int,Int,Int},NTuple{3,Int}})
+    face_oriented_nodes::Dict{Tuple{Int,Int,Int},NTuple{3,Int}};
+    entity_tag::Union{Nothing,Int}=nothing,
+    face_sources::Union{Nothing,Dict{Int,Vector{NamedTuple{(:nas_nodes,:pid),Tuple{NTuple{3,Int},Int}}}}}=nothing)
 
     area_eps = 1e-16
     occ_n1 = Int(occ_node_map[n1])
@@ -197,7 +199,14 @@ function create_face_for_tri!(n1::Int, n2::Int, n3::Int,
     end
     k = face_key(occ_n1, occ_n2, occ_n3)
     if haskey(face_map, k)
-        return face_map[k]
+        surf_existing = face_map[k]
+        # provenance: record duplicate source if requested
+        if face_sources !== nothing && entity_tag !== nothing
+            srcs = get!(face_sources, surf_existing, Vector{NamedTuple{(:nas_nodes,:pid),Tuple{NTuple{3,Int},Int}}}())
+            push!(srcs, (nas_nodes=(n1,n2,n3), pid=Int(entity_tag)))
+            face_sources[surf_existing] = srcs
+        end
+        return surf_existing
     end
     area, _ = tri_area_and_centroid(node_map, n1, n2, n3)
     if !(area > area_eps)
@@ -228,6 +237,10 @@ function create_face_for_tri!(n1::Int, n2::Int, n3::Int,
     surf = gmsh.model.occ.addPlaneSurface([loop])
     face_map[k] = surf
     face_oriented_nodes[k] = (occ_n1, occ_n2, occ_n3)
+    # provenance: first source
+    if face_sources !== nothing && entity_tag !== nothing
+        face_sources[surf] = [(nas_nodes=(n1,n2,n3), pid=Int(entity_tag))]
+    end
     return surf
 end
 
@@ -236,23 +249,28 @@ function build_shared_geometry!(entity_triangles, triangles, node_map, occ_node_
     edge_map = Dict{Tuple{Int,Int},Int}()
     face_map = Dict{Tuple{Int,Int,Int},Int}()
     face_oriented_nodes = Dict{Tuple{Int,Int,Int},NTuple{3,Int}}()
+    # provenance: OCC surface -> list of source triangles (nas nodes, pid)
+    face_sources = Dict{Int,Vector{NamedTuple{(:nas_nodes,:pid),Tuple{NTuple{3,Int},Int}}}}()
 
     if isempty(entity_triangles)
         println("\033[38;5;208m  No entity information found; creating shared surfaces once for all triangles\033[0m")
         for tri in triangles
             try
-                create_face_for_tri!(Int(tri[1]), Int(tri[2]), Int(tri[3]), occ_node_map, node_map, edge_map, face_map, face_oriented_nodes)
+                create_face_for_tri!(Int(tri[1]), Int(tri[2]), Int(tri[3]), occ_node_map, node_map, edge_map, face_map, face_oriented_nodes;
+                    entity_tag=nothing, face_sources=face_sources)
             catch
                 # skip degenerate
             end
         end
     else
         println("\033[36m  Creating shared OCC edges and faces across all regions\033[0m")
-        for (_, tris) in entity_triangles
+        for (entity, tris) in entity_triangles
+            dim, tag = entity
             for tri in tris
                 n1, n2, n3 = Int(tri[1]), Int(tri[2]), Int(tri[3])
                 try
-                    create_face_for_tri!(n1, n2, n3, occ_node_map, node_map, edge_map, face_map, face_oriented_nodes)
+                    create_face_for_tri!(n1, n2, n3, occ_node_map, node_map, edge_map, face_map, face_oriented_nodes;
+                        entity_tag=Int(tag), face_sources=face_sources)
                 catch
                     # skip degenerate
                 end
@@ -260,7 +278,7 @@ function build_shared_geometry!(entity_triangles, triangles, node_map, occ_node_
         end
     end
 
-    return edge_map, face_map, face_oriented_nodes
+    return edge_map, face_map, face_oriented_nodes, face_sources
 end
 
 function get_valid_surfaces()
@@ -271,7 +289,7 @@ function get_valid_surfaces()
     return valid_surfaces
 end
 
-function construct_regions_and_volumes(entity_triangles, face_map, face_oriented_nodes, occ_node_map, valid_surfaces, discrete_entity_names; anomaly_max_examples::Int=50)
+function construct_regions_and_volumes(entity_triangles, face_map, face_oriented_nodes, occ_node_map, valid_surfaces, discrete_entity_names, face_sources, occ_point_coords, edge_map; anomaly_max_examples::Int=50)
     region_signed_surfs = Dict{Tuple{Int,Int},Vector{Int}}()
     region_volumes = Dict{Tuple{Int,Int},Vector{Int}}()
 
@@ -314,6 +332,7 @@ function construct_regions_and_volumes(entity_triangles, face_map, face_oriented
     valid_surfaces_current = get_valid_surfaces()
 
     anomalies = Vector{Any}()
+    debug_edges = Vector{Any}()
     for (entity, surfs) in region_signed_surfs
         dim, tag = entity
         unsigned = unique(surfs)
@@ -421,6 +440,38 @@ function construct_regions_and_volumes(entity_triangles, face_map, face_oriented
                     boundary_edges=be_samples,
                     nonmanifold_edges=nme_samples,
                 ))
+                # Build rich debug info for all nonmanifold edges in this component
+                for (edge, faces_here) in nonmanifold_edges
+                    occ_a, occ_b = edge
+                    coord_a = get(occ_point_coords, occ_a, nothing)
+                    coord_b = get(occ_point_coords, occ_b, nothing)
+                    faces_detail = Vector{Any}()
+                    pid_hist = Dict{Int,Int}()
+                    for f in faces_here
+                        srcs = get(face_sources, f, NamedTuple{(:nas_nodes,:pid),Tuple{NTuple{3,Int},Int}}[])
+                        # summarize per face: pids present and count
+                        pids = [s.pid for s in srcs]
+                        push!(faces_detail, (
+                            face=f,
+                            source_count=length(srcs),
+                            pids=pids,
+                            sources=srcs,
+                        ))
+                        for pid in pids
+                            pid_hist[pid] = get(pid_hist, pid, 0) + 1
+                        end
+                    end
+                    push!(debug_edges, (
+                        region_dim=dim,
+                        region_tag=tag,
+                        component_index=comp_idx,
+                        edge=edge,
+                        edge_coords=(coord_a, coord_b),
+                        incident_faces=faces_here,
+                        faces_detail=faces_detail,
+                        pid_counts=pid_hist,
+                    ))
+                end
             end
             try
                 shell_tag = gmsh.model.occ.addSurfaceLoop(comp_unsigned)
@@ -430,6 +481,19 @@ function construct_regions_and_volumes(entity_triangles, face_map, face_oriented
                     println("    ✓ Region PID=$(tag): Created volume $(vol_tag) (component with $(length(comp_unsigned)) faces)")
                 else
                     println("    ⚠ Region PID=$(tag): component is NOT closed (non-2 edge usages=$(non2)); keeping OPEN_SHELL ($(length(comp_unsigned)) faces)")
+                    # Tag nonmanifold edges as a physical curve group for visualization
+                    if !isempty(nonmanifold_edges)
+                        curve_tags = Int[]
+                        for (e, _) in nonmanifold_edges
+                            if haskey(edge_map, e)
+                                push!(curve_tags, edge_map[e])
+                            end
+                        end
+                        if !isempty(curve_tags)
+                            ptag = gmsh.model.addPhysicalGroup(1, unique(curve_tags))
+                            gmsh.model.setPhysicalName(1, ptag, "NM_PID$(tag)_C$(comp_idx)")
+                        end
+                    end
                 end
             catch e
                 @warn "Could not create shell/volume for region PID=$(tag) component: $e"
@@ -438,7 +502,7 @@ function construct_regions_and_volumes(entity_triangles, face_map, face_oriented
         end
     end
 
-    return region_signed_surfs, region_volumes, anomalies
+    return region_signed_surfs, region_volumes, anomalies, debug_edges
 end
 
 # Analyze whether a set of faces (comp) forms a 2-manifold closed shell by counting edge incidences.
@@ -536,6 +600,172 @@ function write_anomalies_json(path::AbstractString, anomalies)
     end
 end
 
+# Write detailed nonmanifold edge debug info as JSON
+function write_debug_nonmanifold_json(path::AbstractString, debug_edges)
+    json_escape(s::AbstractString) = replace(replace(String(s), '\\' => "\\\\"), '"' => "\\\"")
+    function json_array_ints(v::AbstractVector{<:Integer})
+        return "[" * join(v, ",") * "]"
+    end
+    function json_tuple3(x)
+        return "[" * string(x[1]) * "," * string(x[2]) * "," * string(x[3]) * "]"
+    end
+    open(path, "w") do io
+        print(io, "{\"nonmanifold_edges\":[")
+        for (i, de) in enumerate(debug_edges)
+            if i > 1
+                print(io, ",")
+            end
+            # unpack
+            rd = de.region_dim; rt = de.region_tag; ci = de.component_index
+            e = de.edge; ec = de.edge_coords; inf = de.incident_faces; fd = de.faces_detail; pc = de.pid_counts
+            print(io, "{\"region_dim\":", rd, ",\"region_tag\":", rt, ",\"component_index\":", ci, ",")
+            print(io, "\"edge\":[", e[1], ",", e[2], "],")
+            # edge coords may be nothing if not found
+            if ec[1] === nothing || ec[2] === nothing
+                print(io, "\"edge_coords\":null,")
+            else
+                print(io, "\"edge_coords\":[", json_tuple3(ec[1]), ",", json_tuple3(ec[2]), "],")
+            end
+            print(io, "\"incident_faces\":", json_array_ints(inf), ",")
+            # faces detail array
+            print(io, "\"faces_detail\":[")
+            for (j, fdet) in enumerate(fd)
+                if j > 1
+                    print(io, ",")
+                end
+                face = fdet.face
+                src_count = fdet.source_count
+                pids = fdet.pids
+                sources = fdet.sources
+                print(io, "{\"face\":", face, ",\"source_count\":", src_count, ",\"pids\":[", join(pids, ","), "],\"sources\":[")
+                for (k, s) in enumerate(sources)
+                    if k > 1
+                        print(io, ",")
+                    end
+                    nn = s.nas_nodes; pid = s.pid
+                    print(io, "{\"pid\":", pid, ",\"nas_nodes\":[", nn[1], ",", nn[2], ",", nn[3], "]}")
+                end
+                print(io, "]}")
+            end
+            print(io, "],")
+            # pid histogram
+            print(io, "\"pid_counts\":{")
+            local first = true
+            for (kpid, cnt) in pc
+                if !first
+                    print(io, ",")
+                end
+                first = false
+                print(io, "\"", kpid, "\":", cnt)
+            end
+            print(io, "}}")
+        end
+        print(io, "]}")
+    end
+end
+
+# Export minimal NAS files for each nonmanifold edge hotspot for visualization.
+# One file per hotspot containing only the triangles (from sources) that touch that edge.
+function export_hotspot_nas_files!(base_json_path::AbstractString, debug_edges, node_map::Dict{Int,NTuple{3,Float64}}; occ_to_nas::Union{Nothing,Dict{Int,Vector{Int}}}=nothing)
+    if isempty(debug_edges)
+        return nothing
+    end
+    # directory next to the anomaly JSON
+    base_dir = dirname(base_json_path)
+    base_name = replace(basename(base_json_path), ".json" => "")
+    out_dir = joinpath(base_dir, string(base_name, "_hotspots"))
+    try
+        mkpath(out_dir)
+    catch e
+        @warn "Failed to create hotspot output directory '$out_dir': $e"
+        return nothing
+    end
+
+    # helper to write one NAS file
+    function write_one_hotspot(path::AbstractString, tris::Vector{NamedTuple{(:nodes,:pid),Tuple{NTuple{3,Int},Int}}}, edge_occ::Union{Nothing,Tuple{Int,Int}})
+        # Collect unique node ids
+        node_ids = Set{Int}()
+        for t in tris
+            n1, n2, n3 = t.nodes
+            push!(node_ids, n1); push!(node_ids, n2); push!(node_ids, n3)
+        end
+        # Sort for stable order
+        node_list = sort!(collect(node_ids))
+        # Write NAS
+        open(path, "w") do io
+            println(io, "CEND")
+            println(io, "BEGIN BULK")
+            println(io, "\$ Generated by Nas2Step.export_hotspot_nas_files!()")
+            println(io, "")
+            println(io, "\$ GRID Nodes")
+            for nid in node_list
+                if haskey(node_map, nid)
+                    c = node_map[nid]
+                    println(io, "GRID,", nid, ",,", c[1], ",", c[2], ",", c[3])
+                end
+            end
+            println(io, "")
+            println(io, "\$ Boundary Surface Elements (CTRIA3) for hotspot")
+            eid = 1
+            for t in tris
+                n1, n2, n3 = t.nodes
+                pid = t.pid
+                println(io, "CTRIA3,", eid, ",", pid, ",", n1, ",", n2, ",", n3)
+                eid += 1
+            end
+            # Optionally add a CROD marking the edge if we can map OCC endpoints to NAS node IDs present
+            if edge_occ !== nothing && occ_to_nas !== nothing
+                a_occ, b_occ = edge_occ
+                # pick any present NAS node mapped to each occ id
+                function pick_present(occid::Int)
+                    if !haskey(occ_to_nas, occid)
+                        return nothing
+                    end
+                    for nid in occ_to_nas[occid]
+                        if nid in node_ids
+                            return nid
+                        end
+                    end
+                    return nothing
+                end
+                a_nas = pick_present(a_occ)
+                b_nas = pick_present(b_occ)
+                if a_nas !== nothing && b_nas !== nothing
+                    println(io, "")
+                    println(io, "\$ Line element marking nonmanifold edge")
+                    # Use PID 9999 for visualization tag
+                    println(io, "CROD,1,9999,", a_nas, ",", b_nas)
+                end
+            end
+            println(io, "ENDDATA")
+        end
+    end
+
+    written = 0
+    for (idx, de) in enumerate(debug_edges)
+        # build minimal triangle list from sources
+        tris = Vector{NamedTuple{(:nodes,:pid),Tuple{NTuple{3,Int},Int}}}()
+        for fdet in de.faces_detail
+            for s in fdet.sources
+                push!(tris, (nodes=s.nas_nodes, pid=s.pid))
+            end
+        end
+        if isempty(tris)
+            continue
+        end
+        a, b = de.edge
+        fname = string("edge_", a, "_", b, "_r", de.region_tag, "_c", de.component_index, ".nas")
+        fpath = joinpath(out_dir, fname)
+        try
+            write_one_hotspot(fpath, tris, (de.edge[1], de.edge[2]))
+            written += 1
+        catch e
+            @warn "Failed to write hotspot NAS '$fpath': $e"
+        end
+    end
+    return out_dir, written
+end
+
 function name_regions!(entity_triangles, region_volumes, region_signed_surfs, discrete_entity_names)
     if isempty(entity_triangles)
         return
@@ -599,7 +829,12 @@ function convert_nas_to_step(inpath::AbstractString; outpath::Union{Nothing,Abst
         # Step 2: Build OCC model (shared topology)
         gmsh.model.add("occ")
         occ_node_map, unique_coords, duplicate_nodes = build_occ_points(node_map)
-        edge_map, face_map, face_oriented_nodes = build_shared_geometry!(entity_triangles, triangles, node_map, occ_node_map)
+        # record occ point coordinates for debug
+        occ_point_coords = Dict{Int,NTuple{3,Float64}}()
+        for (nas_node, occ_tag) in occ_node_map
+            occ_point_coords[occ_tag] = node_map[nas_node]
+        end
+    edge_map, face_map, face_oriented_nodes, face_sources = build_shared_geometry!(entity_triangles, triangles, node_map, occ_node_map)
         gmsh.model.occ.synchronize()
 
         # Summary of created surfaces
@@ -611,9 +846,10 @@ function convert_nas_to_step(inpath::AbstractString; outpath::Union{Nothing,Abst
         region_signed_surfs = Dict{Tuple{Int,Int},Vector{Int}}()
         region_volumes = Dict{Tuple{Int,Int},Vector{Int}}()
         anomalies = Any[]
+        debug_edges = Any[]
         if !isempty(entity_triangles)
-            region_signed_surfs, region_volumes, anomalies = construct_regions_and_volumes(
-                entity_triangles, face_map, face_oriented_nodes, occ_node_map, valid_surfaces, discrete_entity_names;
+            region_signed_surfs, region_volumes, anomalies, debug_edges = construct_regions_and_volumes(
+                entity_triangles, face_map, face_oriented_nodes, occ_node_map, valid_surfaces, discrete_entity_names, face_sources, occ_point_coords, edge_map;
                 anomaly_max_examples=anomaly_max_examples)
             gmsh.model.occ.synchronize()
             if !isempty(region_volumes)
@@ -628,6 +864,28 @@ function convert_nas_to_step(inpath::AbstractString; outpath::Union{Nothing,Abst
                     println("  ⚠ Wrote manifoldness anomalies JSON to '$(anomaly_json_path)' (entries=$(length(anomalies)))")
                 catch e
                     @warn "Failed to write anomalies JSON: $e"
+                end
+                # write supplemental debug JSON next to anomaly JSON
+                try
+                    dbg_path = replace(String(anomaly_json_path), ".json" => "_debug_nonmanifold.json")
+                    write_debug_nonmanifold_json(dbg_path, debug_edges)
+                    println("    ↳ Wrote detailed nonmanifold debug JSON to '$(dbg_path)' (edges=$(length(debug_edges)))")
+                catch e
+                    @warn "Failed to write debug nonmanifold JSON: $e"
+                end
+                # write minimal hotspot NAS files for visualization
+                try
+                    # Build reverse map OCC point -> possible NAS nodes for hotspot CROD emission
+                    occ_to_nas = Dict{Int,Vector{Int}}()
+                    for (nas_node, occ_tag) in occ_node_map
+                        push!(get!(occ_to_nas, occ_tag, Int[]), nas_node)
+                    end
+                    out_dir, count = export_hotspot_nas_files!(String(anomaly_json_path), debug_edges, node_map; occ_to_nas=occ_to_nas)
+                    if out_dir !== nothing
+                        println("    ↳ Wrote $(count) hotspot NAS file(s) to '$(out_dir)' for quick visualization")
+                    end
+                catch e
+                    @warn "Failed to export hotspot NAS files: $e"
                 end
             end
         end

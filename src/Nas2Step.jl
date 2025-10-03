@@ -9,6 +9,8 @@ export load_step_summary, verify_step, convert_nas_to_step, nas_to_step
 export extract_boundary_surfaces, has_surface_elements
 export check_nas_volumes, test_closed_shells
 export verify_nas_mesh, check_element_volumes, check_element_quality, check_surface_closure, export_inverted_elements, test_node_swap_fix, check_vertex_coordination, export_mesh_quality_json, comprehensive_mesh_check
+export check_region_overlap, export_region_overlap_json
+export check_interface_conformity, export_interface_conformity_json, check_interface_conformity_json
 
 include("write_nas.jl")
 

@@ -471,6 +471,302 @@ function export_mesh_quality_json(verification_result, output_file="mesh_quality
     return output_file
 end
 
+"""
+    check_region_overlap(nas_file; sample_fraction=0.05, max_checks_per_pair=1000, grid_cells=40, verbose=true)
+
+Detect volumetric overlaps between different PIDs in a NAS tetrahedral mesh.
+
+Method:
+- Parse all CTETRA (etype=4) with their PIDs and node coordinates using Gmsh.
+- Build a uniform 3D grid binning of tetrahedron AABBs per region (PID) to prune pair tests.
+- For each region pair (A,B), sample up to `max_checks_per_pair` tets from each region (or `sample_fraction`) and test whether their centroids lie inside any tet of the other region using the binning.
+- If centroid of a tet in A lies inside a tet in B (or vice versa), record an overlap example.
+
+Return shape (simplified):
+- If no overlaps detected: Dict("status" => "ok", "pairs_checked" => N)
+- If overlaps detected: Dict("status" => "overlap", "overlaps" => [ { pidA, pidB, overlap_hits, sampleA, sampleB, examples=[...] } ... ])
+
+Notes:
+- This is probabilistic (sampling) for scalability; it reports likely overlaps with examples. Increase `sample_fraction` or `max_checks_per_pair` for thoroughness.
+- Inside test uses barycentric coordinates; degenerate tets are skipped.
+"""
+struct TetInfo
+    eid::Int
+    nodes::NTuple{4,Int}
+    centroid::NTuple{3,Float64}
+    aabb_min::NTuple{3,Float64}
+    aabb_max::NTuple{3,Float64}
+end
+
+function check_region_overlap(nas_file::AbstractString; sample_fraction::Real=0.05, max_checks_per_pair::Int=1000, grid_cells::Int=40, verbose::Bool=true)
+    gmsh.initialize()
+    gmsh.option.setNumber("General.Terminal", 0)
+    try
+        gmsh.open(nas_file)
+
+        # collect nodes
+        node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
+        coords = Dict{Int,NTuple{3,Float64}}()
+        for (i, tag) in enumerate(node_tags)
+            idx = (i-1)*3
+            coords[Int(tag)] = (node_coords[idx+1], node_coords[idx+2], node_coords[idx+3])
+        end
+
+    # collect all tetra of all PIDs by entity tag (PID proxy)
+        # Map: pid => Vector{(eid, (n1,n2,n3,n4))}
+        region_tets = Dict{Int,Vector{Tuple{Int,NTuple{4,Int}}}}()
+
+        # Try to use 3D discrete entities to partition by PID-like tags
+        for (dim, tag) in gmsh.model.getEntities(3)
+            etypes, etags, enodes = gmsh.model.mesh.getElements(dim, tag)
+            for (etype, etag_vec, enode_vec) in zip(etypes, etags, enodes)
+                if etype != 4; continue; end
+                nper = 4
+                for i in 1:length(etag_vec)
+                    eid = Int(etag_vec[i])
+                    base = (i-1)*nper
+                    n1 = Int(enode_vec[base+1]); n2 = Int(enode_vec[base+2]); n3 = Int(enode_vec[base+3]); n4 = Int(enode_vec[base+4])
+                    # Use the 3D entity tag as PID proxy if physical group missing
+                    pid = tag
+                    push!(get!(region_tets, pid, Vector{Tuple{Int,NTuple{4,Int}}}()), (eid, (n1,n2,n3,n4)))
+                end
+            end
+        end
+
+        if isempty(region_tets)
+            return Dict("status"=>"no_tets")
+        end
+
+        # Compute AABBs and centroids per tet
+        function tet_info(eid::Int, nd::NTuple{4,Int})
+            p = (coords[nd[1]], coords[nd[2]], coords[nd[3]], coords[nd[4]])
+            cx = (p[1][1]+p[2][1]+p[3][1]+p[4][1])/4
+            cy = (p[1][2]+p[2][2]+p[3][2]+p[4][2])/4
+            cz = (p[1][3]+p[2][3]+p[3][3]+p[4][3])/4
+            xs = (p[1][1],p[2][1],p[3][1],p[4][1]); ys=(p[1][2],p[2][2],p[3][2],p[4][2]); zs=(p[1][3],p[2][3],p[3][3],p[4][3])
+            aabb_min = (minimum(xs), minimum(ys), minimum(zs))
+            aabb_max = (maximum(xs), maximum(ys), maximum(zs))
+            return TetInfo(eid, nd, (cx,cy,cz), aabb_min, aabb_max)
+        end
+
+        reg_infos = Dict{Int,Vector{TetInfo}}()
+        for (pid, tets) in region_tets
+            infos = TetInfo[]
+            for (eid, nd) in tets
+                push!(infos, tet_info(eid, nd))
+            end
+            reg_infos[pid] = infos
+        end
+
+        # Global bounds
+        xs = Float64[]; ys = Float64[]; zs = Float64[]
+        for infos in values(reg_infos)
+            for t in infos
+                push!(xs, t.aabb_min[1]); push!(xs, t.aabb_max[1])
+                push!(ys, t.aabb_min[2]); push!(ys, t.aabb_max[2])
+                push!(zs, t.aabb_min[3]); push!(zs, t.aabb_max[3])
+            end
+        end
+        if isempty(xs)
+            return Dict("status"=>"no_bounds")
+        end
+        minB = (minimum(xs), minimum(ys), minimum(zs))
+        maxB = (maximum(xs), maximum(ys), maximum(zs))
+
+        # Simple uniform grid indexer
+        function grid_index(p::NTuple{3,Float64})
+            gx = clamp(floor(Int, (p[1]-minB[1]) / max(1e-12, (maxB[1]-minB[1])) * grid_cells), 0, grid_cells-1)
+            gy = clamp(floor(Int, (p[2]-minB[2]) / max(1e-12, (maxB[2]-minB[2])) * grid_cells), 0, grid_cells-1)
+            gz = clamp(floor(Int, (p[3]-minB[3]) / max(1e-12, (maxB[3]-minB[3])) * grid_cells), 0, grid_cells-1)
+            return (gx, gy, gz)
+        end
+
+        # Insert tets per PID into grid by AABB coverage
+        function build_grid(infos::Vector{TetInfo})
+            grid = Dict{Tuple{Int,Int,Int},Vector{Int}}()
+            for (idx, ti) in enumerate(infos)
+                # grid range over aabb
+                gmin = grid_index(ti.aabb_min)
+                gmax = grid_index(ti.aabb_max)
+                for ix in gmin[1]:gmax[1], iy in gmin[2]:gmax[2], iz in gmin[3]:gmax[3]
+                    push!(get!(grid, (ix,iy,iz), Int[]), idx)
+                end
+            end
+            return grid
+        end
+
+        function point_in_tet(p::NTuple{3,Float64}, nd::NTuple{4,Int})
+            a = coords[nd[1]]; b = coords[nd[2]]; c = coords[nd[3]]; d = coords[nd[4]]
+            # barycentric using volumes
+            function vol_s(u::NTuple{3,Float64}, v::NTuple{3,Float64}, w::NTuple{3,Float64}, x::NTuple{3,Float64})
+                dv1 = (v[1]-u[1], v[2]-u[2], v[3]-u[3])
+                dv2 = (w[1]-u[1], w[2]-u[2], w[3]-u[3])
+                dv3 = (x[1]-u[1], x[2]-u[2], x[3]-u[3])
+                det = dv1[1]*(dv2[2]*dv3[3] - dv2[3]*dv3[2]) - dv1[2]*(dv2[1]*dv3[3] - dv2[3]*dv3[1]) + dv1[3]*(dv2[1]*dv3[2] - dv2[2]*dv3[1])
+                return det / 6.0
+            end
+            v0s = vol_s(a,b,c,d)
+            if abs(v0s) < 1e-18
+                return false
+            end
+            s1 = vol_s(p,b,c,d)
+            s2 = vol_s(a,p,c,d)
+            s3 = vol_s(a,b,p,d)
+            s4 = vol_s(a,b,c,p)
+            # same sign and sum equals v0 (within tolerance)
+            same_sign = (s1>=0 && s2>=0 && s3>=0 && s4>=0) || (s1<=0 && s2<=0 && s3<=0 && s4<=0)
+            if !same_sign
+                return false
+            end
+            return abs((s1+s2+s3+s4) - v0s) <= 1e-9*abs(v0s)
+        end
+
+        # build grids per region
+        reg_grids = Dict{Int,Any}()
+        for (pid, infos) in reg_infos
+            reg_grids[pid] = build_grid(infos)
+        end
+
+        # helper: candidate tet indices in B whose AABB grid cell matches centroid of candidate
+        function candidate_indices(target_pid::Int, point::NTuple{3,Float64})
+            g = reg_grids[target_pid]
+            idx = grid_index(point)
+            return get(g, idx, Int[])
+        end
+
+        pids = sort(collect(keys(reg_infos)))
+    report = Dict("pairs"=>Any[], "status"=>"ok")
+
+        # Deterministic uniform sampler to avoid Random dependency
+        function uniform_sample_indices(n::Int, k::Int)
+            k = clamp(k, 0, n)
+            if k == 0
+                return Int[]
+            elseif k == n
+                return collect(1:n)
+            else
+                # take approximately evenly spaced indices
+                idxs = Int[]
+                for i in 1:k
+                    # position in [1,n]
+                    pos = 1 + floor(Int, (i-1) * (n-1) / max(1, k-1))
+                    push!(idxs, pos)
+                end
+                return idxs
+            end
+        end
+
+        for i in 1:length(pids)-1
+            for j in i+1:length(pids)
+                pidA = pids[i]; pidB = pids[j]
+                infosA = reg_infos[pidA]; infosB = reg_infos[pidB]
+                # choose sample sizes
+                sA = clamp(round(Int, length(infosA)*sample_fraction), 1, min(length(infosA), max_checks_per_pair))
+                sB = clamp(round(Int, length(infosB)*sample_fraction), 1, min(length(infosB), max_checks_per_pair))
+
+                idxA = uniform_sample_indices(length(infosA), sA)
+                idxB = uniform_sample_indices(length(infosB), sB)
+
+                overlaps = Int[]
+                examples = Any[]
+
+                # test A against B
+                for ia in idxA
+                    ti = infosA[ia]
+                    cand = candidate_indices(pidB, ti.centroid)
+                    for ib in cand
+                        tj = infosB[ib]
+                        # quick AABB check
+                        if !(ti.aabb_min[1] <= tj.aabb_max[1] && ti.aabb_max[1] >= tj.aabb_min[1] &&
+                             ti.aabb_min[2] <= tj.aabb_max[2] && ti.aabb_max[2] >= tj.aabb_min[2] &&
+                             ti.aabb_min[3] <= tj.aabb_max[3] && ti.aabb_max[3] >= tj.aabb_min[3])
+                            continue
+                        end
+                        if point_in_tet(ti.centroid, tj.nodes)
+                            push!(overlaps, 1)
+                            push!(examples, Dict(
+                                "pidA"=>pidA, "tetA"=>ti.eid, "pidB"=>pidB, "tetB"=>tj.eid,
+                                "centroid"=>[ti.centroid[1], ti.centroid[2], ti.centroid[3]]
+                            ))
+                            break
+                        end
+                    end
+                end
+
+                # test B against A
+                for ib in idxB
+                    tj = infosB[ib]
+                    cand = candidate_indices(pidA, tj.centroid)
+                    for ia2 in cand
+                        ti = infosA[ia2]
+                        if !(tj.aabb_min[1] <= ti.aabb_max[1] && tj.aabb_max[1] >= ti.aabb_min[1] &&
+                             tj.aabb_min[2] <= ti.aabb_max[2] && tj.aabb_max[2] >= ti.aabb_min[2] &&
+                             tj.aabb_min[3] <= ti.aabb_max[3] && tj.aabb_max[3] >= ti.aabb_min[3])
+                            continue
+                        end
+                        if point_in_tet(tj.centroid, ti.nodes)
+                            push!(overlaps, 1)
+                            push!(examples, Dict(
+                                "pidA"=>pidA, "tetA"=>ti.eid, "pidB"=>pidB, "tetB"=>tj.eid,
+                                "centroid"=>[tj.centroid[1], tj.centroid[2], tj.centroid[3]]
+                            ))
+                            break
+                        end
+                    end
+                end
+
+                found = sum(overlaps)
+                push!(report["pairs"], Dict(
+                    "pidA"=>pidA, "pidB"=>pidB,
+                    "sampleA"=>sA, "sampleB"=>sB,
+                    "overlap_hits"=>found, "examples"=>examples
+                ))
+                if verbose
+                    println("  Pair (PID=$(pidA), PID=$(pidB)): sampled $(sA)+$(sB), overlap hits=$(found)")
+                end
+            end
+        end
+        # Build simplified return: minimal on success, detailed only for overlapping pairs
+        pairs = report["pairs"]
+        overlaps_only = Any[]
+        # Limit number of examples per pair to keep report compact
+        local MAX_EXAMPLES = 10
+        for p in pairs
+            if get(p, "overlap_hits", 0) > 0
+                ex = get(p, "examples", Any[])
+                ex_trim = length(ex) > MAX_EXAMPLES ? ex[1:MAX_EXAMPLES] : ex
+                push!(overlaps_only, Dict(
+                    "pidA"=>p["pidA"], "pidB"=>p["pidB"],
+                    "overlap_hits"=>p["overlap_hits"],
+                    "sampleA"=>p["sampleA"], "sampleB"=>p["sampleB"],
+                    "examples"=>ex_trim
+                ))
+            end
+        end
+        if isempty(overlaps_only)
+            return Dict("status"=>"ok", "pairs_checked"=>length(pairs))
+        else
+            return Dict("status"=>"overlap", "overlaps"=>overlaps_only)
+        end
+    finally
+        gmsh.finalize()
+    end
+end
+
+"""
+    export_region_overlap_json(nas_file; output_json="region_overlap_report.json", sample_fraction=0.05, max_checks_per_pair=1000, grid_cells=40)
+
+Run `check_region_overlap` and write a JSON report with examples per overlapping pair.
+"""
+function export_region_overlap_json(nas_file::AbstractString; output_json::AbstractString="region_overlap_report.json", sample_fraction::Real=0.05, max_checks_per_pair::Int=1000, grid_cells::Int=40)
+    report = check_region_overlap(nas_file; sample_fraction=sample_fraction, max_checks_per_pair=max_checks_per_pair, grid_cells=grid_cells, verbose=true)
+    open(output_json, "w") do io
+        write_json(io, report, 0)
+    end
+    println("Region overlap report exported to: $(output_json)")
+    return output_json
+end
+
 
 """
     comprehensive_mesh_check(nas_file; output_json="mesh_quality_report.json", 
@@ -937,4 +1233,269 @@ function verify_nas_mesh(filename; verbose=true)
         swap_test=swap_test_result,
         overall_status=overall_status
     )
+end
+
+
+"""
+    check_interface_conformity(nas_file; tol=1e-8, max_examples_per_pair=20, verbose=true)
+
+Check conformity of interfaces between PIDs on a tetrahedral NAS mesh.
+
+Concept:
+- Build boundary faces per PID (faces with odd incidence for that PID).
+- Build coordinate-keyed nodes to allow cross-PID matching regardless of node IDs.
+- For each PID pair (A,B) sharing node keys, build edge sets from boundary faces whose endpoints exist in both A and B.
+- Compare edge sets: edges present on A but not on B (and vice versa) indicate non-conforming triangulations (splits/T-junctions).
+- Additionally, detect hanging nodes: nodes from A that lie on B's edges (without being endpoints) and vice versa.
+
+Return shape (simplified):
+- If all pairs conform: Dict("status"=>"ok", "pairs_checked"=>N)
+- If issues: Dict("status"=>"nonconforming", "problems"=>[ {pidA, pidB, missing_in_B_count, missing_in_B_examples, missing_in_A_count, missing_in_A_examples, hanging_A_on_B_count, hanging_A_on_B_examples, hanging_B_on_A_count, hanging_B_on_A_examples}... ])
+"""
+function check_interface_conformity(nas_file::AbstractString; tol::Real=1e-8, max_examples_per_pair::Int=20, verbose::Bool=true)
+    gmsh.initialize()
+    gmsh.option.setNumber("General.Terminal", 0)
+    try
+        gmsh.open(nas_file)
+
+        # Nodes and coordinates
+        node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
+        coords = Dict{Int,NTuple{3,Float64}}()
+        for (i, tag) in enumerate(node_tags)
+            idx = (i-1)*3
+            coords[Int(tag)] = (node_coords[idx+1], node_coords[idx+2], node_coords[idx+3])
+        end
+
+        # Helper: coordinate key with rounding
+        function ckey(p::NTuple{3,Float64})
+            return (round(p[1]; digits=8), round(p[2]; digits=8), round(p[3]; digits=8))
+        end
+
+        # Collect tets per PID (using 3D entity tag as PID proxy)
+        region_tets = Dict{Int,Vector{Tuple{Int,NTuple{4,Int}}}}()
+        for (dim, tag) in gmsh.model.getEntities(3)
+            etypes, etags, enodes = gmsh.model.mesh.getElements(dim, tag)
+            for (etype, etag_vec, enode_vec) in zip(etypes, etags, enodes)
+                if etype != 4; continue; end
+                for i in 1:length(etag_vec)
+                    eid = Int(etag_vec[i])
+                    base = (i-1)*4
+                    nd = (Int(enode_vec[base+1]), Int(enode_vec[base+2]), Int(enode_vec[base+3]), Int(enode_vec[base+4]))
+                    push!(get!(region_tets, tag, Vector{Tuple{Int,NTuple{4,Int}}}()), (eid, nd))
+                end
+            end
+        end
+        if isempty(region_tets)
+            return Dict("status"=>"no_tets")
+        end
+
+        # Build face incidence: face (sorted 3-tuple of node IDs) -> Dict(pid=>count)
+        face_inc = Dict{NTuple{3,Int},Dict{Int,Int}}()
+        tet_faces = ((1,2,3),(1,2,4),(1,3,4),(2,3,4))
+        for (pid, tets) in region_tets
+            for (eid, nd) in tets
+                n = (nd[1], nd[2], nd[3], nd[4])
+                for f in tet_faces
+                    tri = (n[f[1]], n[f[2]], n[f[3]])
+                    tri_sorted_v = sort!(collect(tri))
+                    d = get!(face_inc, (tri_sorted_v[1],tri_sorted_v[2],tri_sorted_v[3]), Dict{Int,Int}())
+                    d[pid] = get(d, pid, 0) + 1
+                end
+            end
+        end
+
+        # Boundary faces per PID = faces with odd count under that PID
+        boundary_faces_by_pid = Dict{Int,Vector{NTuple{3,Int}}}()
+        for (face, pid_counts) in face_inc
+            for (pid, cnt) in pid_counts
+                if isodd(cnt)
+                    push!(get!(boundary_faces_by_pid, pid, NTuple{3,Int}[]), face)
+                end
+            end
+        end
+
+        # Build node key maps per PID and global reverse map
+        nodes_by_pid = Dict{Int,Vector{Int}}()
+        pid_keyset = Dict{Int,Set{NTuple{3,Float64}}}()
+        key_to_nodes_by_pid = Dict{Int,Dict{NTuple{3,Float64},Vector{Int}}}()
+        for pid in keys(region_tets)
+            nodes = Int[]
+            for (_, nd) in region_tets[pid]
+                append!(nodes, (nd[1], nd[2], nd[3], nd[4]))
+            end
+            nodes = unique(nodes)
+            nodes_by_pid[pid] = nodes
+            ks = Set{NTuple{3,Float64}}()
+            kmap = Dict{NTuple{3,Float64},Vector{Int}}()
+            for nid in nodes
+                k = ckey(coords[nid])
+                push!(ks, k)
+                push!(get!(kmap, k, Int[]), nid)
+            end
+            pid_keyset[pid] = ks
+            key_to_nodes_by_pid[pid] = kmap
+        end
+
+        # Helper: build edge set from faces for a PID restricted to shared node keys with another PID
+        function edges_from_faces(pid::Int, other_pid::Int)
+            faces = get(boundary_faces_by_pid, pid, NTuple{3,Int}[])
+            shared_keys = intersect(pid_keyset[pid], pid_keyset[other_pid])
+            if isempty(shared_keys)
+                return Dict{Tuple{NTuple{3,Float64},NTuple{3,Float64}},Int}()
+            end
+            shared = Set(shared_keys)
+            edge_set = Dict{Tuple{NTuple{3,Float64},NTuple{3,Float64}},Int}()
+            for tri in faces
+                k1 = ckey(coords[tri[1]])
+                k2 = ckey(coords[tri[2]])
+                k3 = ckey(coords[tri[3]])
+                # Only keep edges whose endpoints are present in both PIDs
+                for (a,b) in ((k1,k2),(k1,k3),(k2,k3))
+                    if (a in shared) && (b in shared)
+                        ek = a <= b ? (a,b) : (b,a)
+                        edge_set[ek] = get(edge_set, ek, 0) + 1
+                    end
+                end
+            end
+            return edge_set
+        end
+
+        # Geometry helpers
+        function dot(a,b); return a[1]*b[1] + a[2]*b[2] + a[3]*b[3]; end
+        function sub(a,b); return (a[1]-b[1], a[2]-b[2], a[3]-b[3]); end
+        function norm2(a); return dot(a,a); end
+        function point_on_segment_dist2(p,a,b)
+            ab = sub(b,a)
+            ap = sub(p,a)
+            denom = norm2(ab)
+            if denom <= (tol^2)
+                return norm2(sub(p,a)), 0.0
+            end
+            t = clamp(dot(ap, ab)/denom, 0.0, 1.0)
+            proj = (a[1]+t*ab[1], a[2]+t*ab[2], a[3]+t*ab[3])
+            return norm2(sub(p, proj)), t
+        end
+
+        # Scan PID pairs
+        pids = sort(collect(keys(region_tets)))
+        problems = Any[]
+        pairs_checked = 0
+        for i in 1:length(pids)-1
+            for j in i+1:length(pids)
+                pidA = pids[i]; pidB = pids[j]
+                # Quick adjacency test: share any node key
+                if isempty(intersect(pid_keyset[pidA], pid_keyset[pidB]))
+                    continue
+                end
+                pairs_checked += 1
+
+                edgesA = edges_from_faces(pidA, pidB)
+                edgesB = edges_from_faces(pidB, pidA)
+
+                # Build set difference by keys
+                setA = Set(keys(edgesA)); setB = Set(keys(edgesB))
+                onlyA = setdiff(setA, setB)
+                onlyB = setdiff(setB, setA)
+
+                # Examples formatting helper
+                function edge_example_list(es)
+                    ex = Any[]
+                    for ek in es
+                        if length(ex) >= max_examples_per_pair; break; end
+                        a = ek[1]; b = ek[2]
+                        push!(ex, [ [a[1],a[2],a[3]], [b[1],b[2],b[3]] ])
+                    end
+                    return ex
+                end
+
+                # Hanging nodes: nodes from one PID lying on edges of the other
+                function hanging_nodes_on_edges(pid_from::Int, edges_other::Set{Tuple{NTuple{3,Float64},NTuple{3,Float64}}})
+                    # Candidate nodes restricted to shared key set (interface vicinity)
+                    shared = intersect(pid_keyset[pid_from], pid_keyset[pid_from == pidA ? pidB : pidA])
+                    # Build coordinate list of unique nodes
+                    nodes_coords = NTuple{3,Float64}[]
+                    for k in shared
+                        push!(nodes_coords, k)
+                    end
+                    # Prepare edge geometries
+                    egeom = [ (ek[1], ek[2]) for ek in edges_other ]
+                    count = 0
+                    examples = Any[]
+                    for p in nodes_coords
+                        # skip if p equals an endpoint to avoid double counting
+                        for (a,b) in egeom
+                            if p == a || p == b; continue; end
+                            d2, t = point_on_segment_dist2(p, a, b)
+                            if d2 <= (tol^2) && t > 1e-6 && t < 1-1e-6
+                                count += 1
+                                if length(examples) < max_examples_per_pair
+                                    push!(examples, Dict("point"=>[p[1],p[2],p[3]], "edge"=>[[a[1],a[2],a[3]],[b[1],b[2],b[3]]]))
+                                end
+                                break
+                            end
+                        end
+                        if length(examples) >= max_examples_per_pair
+                            break
+                        end
+                    end
+                    return count, examples
+                end
+
+                hA_count, hA_examples = hanging_nodes_on_edges(pidA, Set(keys(edgesB)))
+                hB_count, hB_examples = hanging_nodes_on_edges(pidB, Set(keys(edgesA)))
+
+                if !isempty(onlyA) || !isempty(onlyB) || hA_count > 0 || hB_count > 0
+                    push!(problems, Dict(
+                        "pidA"=>pidA, "pidB"=>pidB,
+                        "missing_in_B_count"=>length(onlyA),
+                        "missing_in_B_examples"=>edge_example_list(onlyA),
+                        "missing_in_A_count"=>length(onlyB),
+                        "missing_in_A_examples"=>edge_example_list(onlyB),
+                        "hanging_A_on_B_count"=>hA_count,
+                        "hanging_A_on_B_examples"=>hA_examples,
+                        "hanging_B_on_A_count"=>hB_count,
+                        "hanging_B_on_A_examples"=>hB_examples
+                    ))
+                    if verbose
+                        println("  Pair (PID=$(pidA), PID=$(pidB)): non-conforming -> missingInB=$(length(onlyA)), missingInA=$(length(onlyB)), hangA=$(hA_count), hangB=$(hB_count)")
+                    end
+                else
+                    if verbose
+                        println("  Pair (PID=$(pidA), PID=$(pidB)): ✓ conforming")
+                    end
+                end
+            end
+        end
+
+        if isempty(problems)
+            return Dict("status"=>"ok", "pairs_checked"=>pairs_checked)
+        else
+            return Dict("status"=>"nonconforming", "problems"=>problems)
+        end
+    finally
+        gmsh.finalize()
+    end
+end
+
+"""
+    export_interface_conformity_json(nas_file; output_json="interface_conformity_report.json", tol=1e-8)
+
+Run `check_interface_conformity` and write a compact JSON report.
+"""
+function export_interface_conformity_json(nas_file::AbstractString; output_json::AbstractString="interface_conformity_report.json", tol::Real=1e-8)
+    report = check_interface_conformity(nas_file; tol=tol, verbose=true)
+    open(output_json, "w") do io
+        write_json(io, report, 0)
+    end
+    println("Interface conformity report exported to: $(output_json)")
+    return output_json
+end
+
+"""
+    check_interface_conformity_json(nas_file; output_json="interface_conformity_report.json", tol=1e-8)
+
+Back-compat alias for export_interface_conformity_json.
+"""
+function check_interface_conformity_json(nas_file::AbstractString; output_json::AbstractString="interface_conformity_report.json", tol::Real=1e-8)
+    return export_interface_conformity_json(nas_file; output_json=output_json, tol=tol)
 end
