@@ -801,7 +801,7 @@ function name_regions!(entity_triangles, region_volumes, region_signed_surfs, di
 end
 
 """
-    convert_nas_to_step(inpath; outpath=nothing, featureAngleDeg=40, sewFaces=true, tol=1e-5)
+    convert_nas_to_step(inpath; outpath=nothing, featureAngleDeg=40, sewFaces=true, tol=1e-4)
 
 Convert a NASTRAN mesh into a STEP file using a shared-topology OCC reconstruction.
 
@@ -809,7 +809,7 @@ This function orchestrates the workflow and delegates each step to small helpers
 to keep logic clear and maintainable.
 """
 function convert_nas_to_step(inpath::AbstractString; outpath::Union{Nothing,AbstractString}=nothing,
-    featureAngleDeg::Real=40, sewFaces::Bool=true, tol::Real=1e-5,
+    featureAngleDeg::Real=40, sewFaces::Bool=true, tol::Real=1e-4,
     anomaly_json_path::Union{Nothing,AbstractString}=nothing, anomaly_max_examples::Int=50)
 
     # all helpers are now defined at top-level

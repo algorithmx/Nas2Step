@@ -12,6 +12,26 @@ export verify_nas_mesh, check_element_volumes, check_element_quality, check_surf
 export check_region_overlap, export_region_overlap_json
 export check_interface_conformity, export_interface_conformity_json, check_interface_conformity_json, export_interface_mismatch_surfaces
 
+# Phase 1: Enhanced Interface Analysis (Surgical Repair)
+export build_interface_topology, InterfaceTopology, EdgeKey, Triangle, BoundingBox
+export classify_interface_mismatches, InterfaceClassification, EdgeMismatch, MismatchType
+export build_boundary_constraints, BoundaryConstraints, check_constraint_violations
+export export_interface_topology_json, export_classification_json, export_constraints_json
+
+# Phase 2: Repair Strategy Generation
+export generate_repair_plan, RepairPlan, EdgeInsertionPlan, QualityThresholds
+export determine_dominant_side, export_repair_plan_json, default_thresholds
+export export_interface_mismatches_json
+
+# Phase 3: Surgical Mesh Repair Execution (disabled pending integration)
+# export RepairWorkspace, create_checkpoint!, begin_transaction!, commit_transaction!, rollback_transaction!
+# export delete_face!, add_face!, add_node!, get_face_by_nodes, get_node_id_by_coords
+# export export_modified_mesh, print_workspace_stats
+# export apply_quad_retriangulation!, apply_edge_insertion_plan!, apply_repair_plan!
+# export execute_repairs_from_json, load_repair_plan_from_json
+# export verify_interface_conformity, compare_conformity, print_conformity_report
+# export print_improvement_report, verify_adjacent_interfaces, export_verification_report
+
 include("write_nas.jl")
 
 include("inspect.jl")
@@ -24,5 +44,13 @@ include("analyze.jl")
 
 include("verify.jl")
 
+include("repair/interface_topology.jl")
+include("repair/edge_classification.jl")
+include("repair/boundary_constraints.jl")
+include("repair/repair_planning.jl")
+include("repair/repair_workspace.jl")
+include("repair/repair_execution.jl")
+include("repair/repair_verification.jl")
+include("repair/interface_analysis_export.jl")
 
 end # module Nas2Step
