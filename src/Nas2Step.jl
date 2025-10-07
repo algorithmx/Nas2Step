@@ -83,6 +83,7 @@ include("repair/symmetric_strategy_selection.jl")
 # Phase 5: Repair Execution and Validation
 include("repair/repair_workspace.jl")
 include("repair/repair_execution.jl")
+include("repair/unified_mesh_generation.jl")
 include("repair/repair_validation.jl")
 include("repair/repair_orchestration.jl")
 include("repair/repair_verification.jl")

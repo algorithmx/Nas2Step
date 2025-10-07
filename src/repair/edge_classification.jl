@@ -73,6 +73,38 @@ struct EdgeMismatch
     diagnostics::Union{UnknownDiagnostics,Nothing}
 end
 
+# Backward-compatibility convenience constructor (without diagnostics)
+# Older tests/builders construct EdgeMismatch without the optional diagnostics field.
+# This method forwards to the full constructor with `nothing` diagnostics.
+function EdgeMismatch(
+    edge_key::EdgeKey,
+    mismatch_type::MismatchType,
+    present_in::Symbol,
+    should_be_in::Int,
+    hanging_nodes::Vector{NTuple{3,Float64}},
+    affected_triangles::Vector{Int},
+    quad_vertices::Vector{NTuple{3,Float64}},
+    triangles_to_replace::Vector{Int},
+    complexity_score::Float64,
+    min_affected_triangle_quality::Float64,
+    repair_feasible::Bool
+)
+    return EdgeMismatch(
+        edge_key,
+        mismatch_type,
+        present_in,
+        should_be_in,
+        hanging_nodes,
+        affected_triangles,
+        quad_vertices,
+        triangles_to_replace,
+        complexity_score,
+        min_affected_triangle_quality,
+        repair_feasible,
+        nothing,
+    )
+end
+
 """
 Complete classification report for an interface.
 """
@@ -101,6 +133,54 @@ struct InterfaceClassification
     total_feasible::Int
     total_infeasible::Int
     average_complexity::Float64
+end
+
+# Backward-compatibility constructor (legacy short signature)
+# InterfaceClassification(topology, mismatches_A, mismatches_B,
+#   t_junction_count, diagonal_count, refinement_count, quad_mismatch_count,
+#   boundary_edge_count, non_manifold_count, average_complexity)
+function InterfaceClassification(
+    topology::InterfaceTopology,
+    mismatches_A::Vector{EdgeMismatch},
+    mismatches_B::Vector{EdgeMismatch},
+    t_junction_count::Int,
+    diagonal_count::Int,
+    refinement_count::Int,
+    quad_mismatch_count::Int,
+    boundary_edge_count::Int,
+    non_manifold_count::Int,
+    average_complexity::Float64
+)
+    all_mismatches = vcat(mismatches_A, mismatches_B)
+    feasible_count = count(m -> m.repair_feasible, all_mismatches)
+    infeasible_count = length(all_mismatches) - feasible_count
+    # Fill missing categories with zeros for legacy construction
+    unshared_endpoint_count = 0
+    degenerate_edge_count = 0
+    source_edge_absent_count = 0
+    quad_not_found_in_source_count = 0
+    target_uses_finer_triangulation_count = 0
+    unknown_count = 0
+    return InterfaceClassification(
+        topology,
+        mismatches_A,
+        mismatches_B,
+        t_junction_count,
+        diagonal_count,
+        refinement_count,
+        quad_mismatch_count,
+        boundary_edge_count,
+        non_manifold_count,
+        unshared_endpoint_count,
+        degenerate_edge_count,
+        source_edge_absent_count,
+        quad_not_found_in_source_count,
+        target_uses_finer_triangulation_count,
+        unknown_count,
+        feasible_count,
+        infeasible_count,
+        average_complexity,
+    )
 end
 
 # ============================================================================
@@ -719,9 +799,16 @@ function classify_edge_mismatch(edge::EdgeKey,
     
     # Extract all vertices from the TARGET side to search for hanging nodes
     # Hanging nodes are vertices in the target mesh that lie ON the source edge
+    # Include both target face vertices and shared node keys to catch topology nodes
+    # that may not be part of the target interface faces in this minimal context
     target_nodes = Set{NTuple{3,Float64}}()
     for tri in target_faces
         push!(target_nodes, tri.coord1, tri.coord2, tri.coord3)
+    end
+    # Also consider shared node keys (already rounded) as candidate nodes
+    # Tests may inject hanging nodes via shared_node_keys only
+    for k in topology.shared_node_keys
+        push!(target_nodes, k)
     end
     
     if debug
@@ -1004,12 +1091,14 @@ If debug=true, will print detailed diagnostics for the first debug_samples misma
 function classify_interface_mismatches(topology::InterfaceTopology;
                                       tol::Real=1e-4,
                                       debug::Bool=false,
-                                      debug_samples::Int=3)::InterfaceClassification
+                                      debug_samples::Int=3,
+                                      verbose::Bool=true)::InterfaceClassification
     
-    println("Classifying edge mismatches for PID=$(topology.pidA) ↔ PID=$(topology.pidB)...")
-    
-    if debug
-        println("  [DEBUG MODE ENABLED] Will show detailed diagnostics for first $debug_samples mismatches")
+    if verbose
+        println("Classifying edge mismatches for PID=$(topology.pidA) ↔ PID=$(topology.pidB)...")
+        if debug
+            println("  [DEBUG MODE ENABLED] Will show detailed diagnostics for first $debug_samples mismatches")
+        end
     end
     
     # Classify edges missing in B (present only in A)
@@ -1063,21 +1152,23 @@ function classify_interface_mismatches(topology::InterfaceTopology;
         0.0
     end
     
-    println("  Classification complete:")
-    println("    T-junctions: $t_junction_count")
-    println("    Diagonal mismatches: $diagonal_count")
-    println("    Refinement differences: $refinement_count")
-    println("    Quad mismatches: $quad_mismatch_count")
-    println("    Boundary edges: $boundary_edge_count")
-    println("    Non-manifold: $non_manifold_count")
-    println("    Unshared endpoints: $unshared_endpoint_count")
-    println("    Degenerate edges: $degenerate_edge_count")
-    println("    Source edge absent: $source_edge_absent_count")
-    println("    Quad not found in source: $quad_not_found_in_source_count")
-    println("    Target uses finer triangulation: $target_uses_finer_triangulation_count")
-    println("    Unknown: $unknown_count")
-    println("    Feasible for repair: $feasible_count / $(length(all_mismatches))")
-    println("    Average complexity: $(round(avg_complexity, digits=2))")
+    if verbose
+        println("  Classification complete:")
+        println("    T-junctions: $t_junction_count")
+        println("    Diagonal mismatches: $diagonal_count")
+        println("    Refinement differences: $refinement_count")
+        println("    Quad mismatches: $quad_mismatch_count")
+        println("    Boundary edges: $boundary_edge_count")
+        println("    Non-manifold: $non_manifold_count")
+        println("    Unshared endpoints: $unshared_endpoint_count")
+        println("    Degenerate edges: $degenerate_edge_count")
+        println("    Source edge absent: $source_edge_absent_count")
+        println("    Quad not found in source: $quad_not_found_in_source_count")
+        println("    Target uses finer triangulation: $target_uses_finer_triangulation_count")
+        println("    Unknown: $unknown_count")
+        println("    Feasible for repair: $feasible_count / $(length(all_mismatches))")
+        println("    Average complexity: $(round(avg_complexity, digits=2))")
+    end
     
     return InterfaceClassification(
         topology,

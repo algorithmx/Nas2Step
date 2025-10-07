@@ -109,12 +109,23 @@ function build_symmetric_repair_plan(
         push!(feasibility_issues, "Insufficient repairable edges ($total_repairable/$length(updated_mismatches))")
     end
     
-    # NOTE: Phase 5 would generate the actual UnifiedInterfaceMesh here
-    # For now, create a placeholder
-    unified_mesh = UnifiedInterfaceMesh()
+    # Phase 5: generate the actual UnifiedInterfaceMesh (MVP)
+    unified_mesh = generate_unified_interface_mesh(
+        topology,
+        updated_mismatches,
+        constraints;
+        thresholds=thresholds,
+        verbose=verbose
+    )
     
-    # Compatibility score estimate (Phase 5 would compute actual score)
-    compatibility_score = total_repairable / max(1, length(updated_mismatches))
+    # Feasibility and score from unified mesh
+    is_feasible = unified_mesh.compatible_with_A && unified_mesh.compatible_with_B && !isempty(unified_mesh.triangles)
+    if !is_feasible
+        push!(feasibility_issues, "Unified mesh not compatible or empty")
+        append!(feasibility_issues, unified_mesh.compatibility_report)
+    end
+    # Simple compatibility score: weighted by fraction of non-skipped edges and min quality
+    compatibility_score = (total_repairable / max(1, length(updated_mismatches))) * (unified_mesh.min_triangle_quality)
     
     if verbose
         println("      Strategy statistics:")
@@ -136,7 +147,7 @@ function build_symmetric_repair_plan(
         edges_from_B,
         edges_compromised,
         0,  # edges_synthesized (Phase 5)
-        min_quality,
+        isempty(unified_mesh.triangles) ? 0.0 : unified_mesh.min_triangle_quality,
         compatibility_score,
         topology,
         constraints
@@ -310,7 +321,7 @@ function orchestrate_single_interface_repair(
         if verbose
             println("\n[2/7] Building interface topology...")
         end
-        topology = build_interface_topology(mesh, pid_a, pid_b)
+    topology = build_interface_topology(mesh_file, pid_a, pid_b)
         if verbose
             println("      ✓ Topology built: $(length(topology.edges_A)) edges in A, $(length(topology.edges_B)) edges in B")
         end
@@ -319,9 +330,10 @@ function orchestrate_single_interface_repair(
         if verbose
             println("\n[3/7] Classifying interface mismatches (symmetric)...")
         end
-        sym_mismatches = classify_interface_mismatches_symmetric(topology, tol=1e-4, verbose=verbose)
-        
-        total_mismatches = length(sym_mismatches)
+    sym_result = classify_interface_mismatches_symmetric(topology, tol=1e-4, verbose=verbose)
+    sym_mismatches = sym_result.symmetric_mismatches
+
+    total_mismatches = length(sym_mismatches)
         if verbose
             println("      ✓ Classified: $total_mismatches symmetric edge mismatches")
         end
@@ -606,7 +618,8 @@ function orchestrate_multi_interface_repair(
             topology = build_interface_topology_from_workspace(ws, pid_a, pid_b)
             
             # Classify mismatches
-            sym_mismatches = classify_interface_mismatches_symmetric(topology, tol=1e-4, verbose=verbose)
+            sym_result = classify_interface_mismatches_symmetric(topology, tol=1e-4, verbose=verbose)
+            sym_mismatches = sym_result.symmetric_mismatches
             
             if isempty(sym_mismatches)
                 if verbose

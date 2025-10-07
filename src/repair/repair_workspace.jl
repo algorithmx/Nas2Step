@@ -563,10 +563,10 @@ function verify_mesh_integrity(ws::RepairWorkspace, pidA::Int, pidB::Int)
         end
     end
     
-    # Basic manifoldness check: build edge incidence map
-    edge_incidence = Dict{Tuple{Int,Int}, Int}()
+    # Basic manifoldness check: build edge incidence map with per-PID counts
+    edge_pid_incidence = Dict{Tuple{Int,Int}, Dict{Int,Int}}()
     
-    for pid in [pidA, pidB]
+    for pid in (pidA, pidB)
         faces = ws.working_faces[pid]
         for face_nodes in faces
             # Create edges (sorted pairs)
@@ -577,17 +577,73 @@ function verify_mesh_integrity(ws::RepairWorkspace, pidA::Int, pidB::Int)
             ]
             
             for edge in edges
-                edge_incidence[edge] = get(edge_incidence, edge, 0) + 1
+                d = get!(edge_pid_incidence, edge, Dict{Int,Int}())
+                d[pid] = get(d, pid, 0) + 1
             end
         end
     end
     
-    # Check no edge is shared by more than 2 faces
-    for (edge, count) in edge_incidence
-        if count > 2
-            @warn "Edge $edge is shared by $count faces (non-manifold)"
-            # This is a warning, not an error, as some cases may be valid
+    # Consolidate and report edges shared by more than 2 faces across both PIDs
+    total_edges_scanned = length(edge_pid_incidence)
+    nonmanifold = Vector{Tuple{Tuple{Int,Int}, Int, Int, Int}}()  # (edge, total, a_cnt, b_cnt)
+    max_inc = 0
+    hist = Dict{Int,Int}()  # incidence -> count
+    dist_a_only = 0
+    dist_b_only = 0
+    dist_both = 0
+    
+    for (edge, perpid) in edge_pid_incidence
+        a_cnt = get(perpid, pidA, 0)
+        b_cnt = get(perpid, pidB, 0)
+        total = a_cnt + b_cnt
+        if total > 2
+            push!(nonmanifold, (edge, total, a_cnt, b_cnt))
+            max_inc = max(max_inc, total)
+            hist[total] = get(hist, total, 0) + 1
+            if a_cnt > 0 && b_cnt > 0
+                dist_both += 1
+            elseif a_cnt > 0
+                dist_a_only += 1
+            elseif b_cnt > 0
+                dist_b_only += 1
+            end
         end
+    end
+    
+    if !isempty(nonmanifold)
+        total_nm = length(nonmanifold)
+        pct_nm = total_edges_scanned > 0 ? round(100 * total_nm / total_edges_scanned, digits=2) : 0.0
+        # Sort examples by descending incidence
+        sort!(nonmanifold; by = x -> x[2], rev = true)
+        sample_n = min(5, total_nm)
+        examples_lines = String[]
+        for i in 1:sample_n
+            e, tot, ac, bc = nonmanifold[i]
+            n1, n2 = e
+            c1 = get(ws.working_nodes, n1, (NaN,NaN,NaN))
+            c2 = get(ws.working_nodes, n2, (NaN,NaN,NaN))
+            mid = ((c1[1]+c2[1])/2, (c1[2]+c2[2])/2, (c1[3]+c2[3])/2)
+            push!(examples_lines, "  • $(e)×$(tot) [A:$(ac), B:$(bc)] mid=$(round.(collect(mid); digits=3))")
+        end
+        remaining = total_nm - sample_n
+        # Build histogram string compactly (e.g., 3→x, 4→y, ...)
+        hist_keys = sort(collect(keys(hist)))
+        hist_items = ["$(k)→$(hist[k])" for k in hist_keys]
+        hist_str = isempty(hist_items) ? "-" : join(hist_items, ", ")
+        
+        @warn "Non-manifold edges detected: $(total_nm) ($(pct_nm)% of $(total_edges_scanned)), max incidence=$(max_inc)."
+        println("  Incidence histogram: $(hist_str)")
+        println("  Distribution by side: A-only=$(dist_a_only), B-only=$(dist_b_only), both=$(dist_both)")
+        if !isempty(examples_lines)
+            println("  Examples:")
+            for line in examples_lines
+                println(line)
+            end
+            if remaining > 0
+                println("  ... and $(remaining) more")
+            end
+        end
+        # This is a warning, not an error, as some cases may be valid
     end
     
     return true

@@ -15,19 +15,27 @@ import Main: RepairWorkspace, begin_transaction!, commit_transaction!, rollback_
 import Main: delete_face!, add_face!, add_node!, get_face_by_nodes, get_node_id_by_coords
 
 # Define local aliases/types matching what repair_execution.jl expects, then include it
-# Satisfy type annotations without needing full implementation
 const NasMesh = Any
 
+"""
+Local mirror of EdgeInsertionPlan matching src/repair/repair_planning.jl.
+Only the fields used by repair_execution.jl are functionally relevant here.
+"""
 mutable struct EdgeInsertionPlan
-    edge_key::Main.Nas2Step.EdgeKey
-    plan_type::Symbol
-    triangles_to_replace::Vector{Vector{NTuple{3,Float64}}}
-    new_triangles::Vector{Vector{NTuple{3,Float64}}}
+    target_triangle::Int
+    insert_edge::Main.Nas2Step.EdgeKey
+    split_type::Symbol
     new_nodes::Vector{NTuple{3,Float64}}
-    predicted_min_quality::Float64
-    predicted_max_quality_loss::Float64
+    existing_nodes::Vector{Int}
+    old_triangles::Vector{NTuple{9,Float64}}
+    replacement_triangles::Vector{NTuple{9,Float64}}
+    min_angle_before::Float64
+    min_angle_after::Float64
+    quality_acceptable::Bool
+    depends_on::Vector{Int}
+    violates_constraints::Bool
+    constraint_violations::Vector{String}
     is_feasible::Bool
-    feasibility_issues::Vector{String}
 end
 
 mutable struct RepairPlan
@@ -47,6 +55,28 @@ Base.include(@__MODULE__, joinpath(@__DIR__, "..", "..", "src", "repair", "repai
 
 # Helpers
 coords_of(ws, ids::Vector{Int}) = [ws.working_nodes[i] for i in ids]
+to_flat(tri::Vector{NTuple{3,Float64}})::NTuple{9,Float64} = (tri[1]..., tri[2]..., tri[3]...)
+
+"""
+Convenience builder for a quad retriangulation plan.
+"""
+function make_quad_plan(edge::Main.Nas2Step.EdgeKey,
+                        old1::Vector{NTuple{3,Float64}}, old2::Vector{NTuple{3,Float64}},
+                        new1::Vector{NTuple{3,Float64}}, new2::Vector{NTuple{3,Float64}};
+                        feasible::Bool = true)
+    return EdgeInsertionPlan(
+        0,
+        edge,
+        :quad_retriangulation,
+        NTuple{3,Float64}[],
+        Int[],
+        [to_flat(old1), to_flat(old2)],
+        [to_flat(new1), to_flat(new2)],
+        0.0, 0.0, true,
+        Int[], false, String[],
+        feasible
+    )
+end
 
 @testset "Minimal pipeline: quad retriangulation success" begin
     ws = Nas2StepTestUtils.create_minimal_workspace()
@@ -58,14 +88,8 @@ coords_of(ws, ids::Vector{Int}) = [ws.working_nodes[i] for i in ids]
     new1 = coords_of(ws, [1,2,4])
     new2 = coords_of(ws, [2,3,4])
 
-    p = EdgeInsertionPlan(
-        Main.Nas2Step.EdgeKey(ws.working_nodes[1], ws.working_nodes[3]),
-        :quad_retriangulation,
-        [triA, triB],
-        [new1, new2],
-        NTuple{3,Float64}[],
-        0.0, 0.0, true, String[]
-    )
+    p = make_quad_plan(Main.Nas2Step.EdgeKey(ws.working_nodes[1], ws.working_nodes[3]),
+                       triA, triB, new1, new2)
 
     plan = RepairPlan((pid, 2), :subdivide_A, [p], 1, 0, 0, 0.0, 0.0, true, String[])
 
@@ -85,10 +109,11 @@ end
     triA = coords_of(ws, [1,2,3])
     triB = coords_of(ws, [1,3,4])
     fake = (99.9, 99.9, 99.9)  # Ensure missing node coordinate
-    bad1 = EdgeInsertionPlan(Main.Nas2Step.EdgeKey(ws.working_nodes[1], ws.working_nodes[3]), :quad_retriangulation,
-                             [triA, triB], [coords_of(ws, [1,2,4]), [ws.working_nodes[2], ws.working_nodes[3], fake]], NTuple{3,Float64}[], 0.0, 0.0, true, String[])
-    bad2 = EdgeInsertionPlan(Main.Nas2Step.EdgeKey(ws.working_nodes[5], ws.working_nodes[7]), :quad_retriangulation,
-                             [coords_of(ws,[5,6,7]), coords_of(ws,[5,7,8])], [[ws.working_nodes[5], ws.working_nodes[6], fake], coords_of(ws,[6,7,8])], NTuple{3,Float64}[], 0.0, 0.0, true, String[])
+    bad1 = make_quad_plan(Main.Nas2Step.EdgeKey(ws.working_nodes[1], ws.working_nodes[3]),
+                          triA, triB, coords_of(ws, [1,2,4]), [ws.working_nodes[2], ws.working_nodes[3], fake])
+    bad2 = make_quad_plan(Main.Nas2Step.EdgeKey(ws.working_nodes[5], ws.working_nodes[7]),
+                          coords_of(ws,[5,6,7]), coords_of(ws,[5,7,8]),
+                          [ws.working_nodes[5], ws.working_nodes[6], fake], coords_of(ws,[6,7,8]))
 
     plan = RepairPlan((pid, 2), :subdivide_A, [bad1, bad2], 2, 0, 0, 0.0, 0.0, true, String[])
     ok = apply_repair_plan!(ws, plan)
@@ -103,8 +128,8 @@ end
     pid = 1
     triA = coords_of(ws, [1,2,3])
     triB = coords_of(ws, [1,3,4])
-    infeas = EdgeInsertionPlan(Main.Nas2Step.EdgeKey(ws.working_nodes[1], ws.working_nodes[3]), :quad_retriangulation,
-                               [triA, triB], [triA, triB], NTuple{3,Float64}[], 0.0, 0.0, false, ["not feasible"])
+    infeas = make_quad_plan(Main.Nas2Step.EdgeKey(ws.working_nodes[1], ws.working_nodes[3]),
+                               triA, triB, triA, triB; feasible=false)
     plan = RepairPlan((pid, 2), :subdivide_A, [infeas], 1, 0, 0, 0.0, 0.0, true, String[])
     ok = apply_repair_plan!(ws, plan)
     @test ok === false
