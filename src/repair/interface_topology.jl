@@ -11,6 +11,31 @@ using JSON
 """
 Coordinate-based edge key for geometric matching.
 Nodes are ordered (smaller coordinate tuple first) for consistent hashing.
+
+# IMPORTANT: Coordinate Rounding Policy
+
+EdgeKey coordinates are ALWAYS rounded to 4 decimal digits during construction
+via the `ckey()` helper function in `build_interface_topology()`. This provides:
+- Hash consistency for dictionary lookups
+- Topological stability (vertices within ~0.0001 are considered identical)
+- Canonical representation for edge matching
+
+## Consequences:
+- Triangle structs store ORIGINAL (unrounded) coordinates
+- EdgeKey structs store ROUNDED coordinates (4 digits)
+- When comparing EdgeKey coords with Triangle coords, you MUST:
+  * Use rounding-aware comparison (check both exact and rounded), OR
+  * Use tolerance-based comparison (e.g., are_nodes_equal() from edge_classification.jl)
+
+## Factory Pattern:
+Always create EdgeKeys using:
+```julia
+ckey(p) = (round(p[1]; digits=4), round(p[2]; digits=4), round(p[3]; digits=4))
+EdgeKey(ckey(coord1), ckey(coord2))
+```
+
+NEVER create EdgeKeys directly from unrounded coordinates unless you understand
+the implications for hash consistency.
 """
 struct EdgeKey
     node1::NTuple{3,Float64}
@@ -18,6 +43,8 @@ struct EdgeKey
     
     function EdgeKey(n1::NTuple{3,Float64}, n2::NTuple{3,Float64})
         # Canonical ordering for consistent comparison
+        # Uses lexicographic ordering on coordinate tuples
+        # Note: This ordering is for hash consistency, not geometric meaning
         if n1 <= n2
             new(n1, n2)
         else
@@ -26,6 +53,8 @@ struct EdgeKey
     end
 end
 
+# EdgeKey comparison uses exact equality because all EdgeKeys should be
+# constructed with pre-rounded coordinates via ckey()
 Base.hash(ek::EdgeKey, h::UInt) = hash((ek.node1, ek.node2), h)
 Base.:(==)(a::EdgeKey, b::EdgeKey) = (a.node1 == b.node1) && (a.node2 == b.node2)
 
@@ -69,6 +98,90 @@ function Triangle(n1::Int, n2::Int, n3::Int, elem_id::Int,
     
     Triangle(n1, n2, n3, elem_id, c1, c2, c3, centroid, area, normal)
 end
+
+# ============================================================================
+# Tolerance-based geometric comparison helpers
+# ============================================================================
+
+"""
+    are_nodes_equal_local(node1, node2; tol=1e-4)
+
+Check if two coordinate tuples are equal within geometric tolerance.
+Uses Euclidean distance comparison.
+
+This is a local copy of the function from edge_classification.jl to avoid
+circular dependencies. Prefer using the version from edge_classification.jl
+when available.
+"""
+function are_nodes_equal_local(node1::NTuple{3,Float64}, 
+                               node2::NTuple{3,Float64}; 
+                               tol::Real=1e-4)::Bool
+    dx = node1[1] - node2[1]
+    dy = node1[2] - node2[2]
+    dz = node1[3] - node2[3]
+    dist2 = dx*dx + dy*dy + dz*dz
+    return dist2 <= tol*tol
+end
+
+"""
+    triangle_has_edge(triangle::Triangle, edge::EdgeKey; tol::Real=1e-4)
+
+Check if a triangle contains both endpoints of an edge.
+
+Returns:
+- (true, vertex_index): if triangle has the edge, with vertex_index being the
+  index (1, 2, or 3) of the opposite vertex not on the edge
+- (false, nothing): if triangle doesn't have both edge endpoints
+
+# Comparison Strategy
+Uses tolerance-based geometric comparison to handle the coordinate rounding
+difference between EdgeKey (rounded) and Triangle (unrounded) coordinates.
+
+This replaces the previous TriangleHasEdge which mixed rounding and tolerance
+redundantly. Pure tolerance-based comparison is simpler and more consistent.
+"""
+function triangle_has_edge(triangle::Triangle, edge::EdgeKey; tol::Real=1e-4)
+    # Check which triangle vertices match the edge endpoints
+    coords = [triangle.coord1, triangle.coord2, triangle.coord3]
+    
+    # Find matches for each edge endpoint
+    matches_node1 = Int[]
+    matches_node2 = Int[]
+    
+    for (i, coord) in enumerate(coords)
+        if are_nodes_equal_local(coord, edge.node1, tol=tol)
+            push!(matches_node1, i)
+        end
+        if are_nodes_equal_local(coord, edge.node2, tol=tol)
+            push!(matches_node2, i)
+        end
+    end
+    
+    # Triangle has the edge if we found exactly one match for each endpoint
+    # and they're different vertices
+    if length(matches_node1) == 1 && length(matches_node2) == 1 && 
+       matches_node1[1] != matches_node2[1]
+        
+        # Find the opposite vertex (the one not on the edge)
+        edge_vertices = Set([matches_node1[1], matches_node2[1]])
+        opposite_vertex = first(setdiff([1, 2, 3], edge_vertices))
+        
+        return (true, opposite_vertex)
+    end
+    
+    return (false, nothing)
+end
+
+# Backward compatibility alias - redirect old name to new implementation
+"""
+    TriangleHasEdge(triangle::Triangle, edge::EdgeKey; digits=4, tol::Real=1e-4)
+
+DEPRECATED: Use triangle_has_edge() instead.
+This alias provides backward compatibility.
+"""
+TriangleHasEdge(triangle::Triangle, edge::EdgeKey; digits=4, tol::Real=1e-4) = 
+    triangle_has_edge(triangle, edge; tol=tol)
+
 
 """
 Bounding box for spatial queries.
@@ -135,10 +248,12 @@ end
 # ============================================================================
 
 """
-    build_interface_topology(nas_file, pidA, pidB; tol=1e-8)
+    build_interface_topology(nas_file, pidA, pidB; tol=1e-4)
 
 Build complete topology map for the interface between two PIDs.
 Extracts all boundary triangles, edges, and shared nodes.
+
+Tolerance (tol) defaults to 1e-4 for all geometric comparisons.
 """
 function build_interface_topology(nas_file::String, pidA::Int, pidB::Int; 
                                   tol::Real=1e-4)::InterfaceTopology
@@ -157,7 +272,19 @@ function build_interface_topology(nas_file::String, pidA::Int, pidB::Int;
             coords[Int(tag)] = (node_coords[idx+1], node_coords[idx+2], node_coords[idx+3])
         end
         
-        # Helper: coordinate key with rounding
+        # ====================================================================
+        # CRITICAL: Coordinate Key Factory Function
+        # ====================================================================
+        # This is the ONLY place where coordinates should be rounded for EdgeKey creation.
+        # 
+        # ckey() rounds coordinates to 4 decimal digits (~0.0001 geometric tolerance)
+        # This provides:
+        # - Topological stability: vertices within 0.0001 are treated as identical
+        # - Hash consistency: ensures EdgeKey dictionary lookups work correctly
+        # - Canonical form: all EdgeKeys use rounded coordinates
+        #
+        # IMPORTANT: All EdgeKeys MUST be created using ckey()-rounded coordinates!
+        # ====================================================================
         function ckey(p::NTuple{3,Float64})
             return (round(p[1]; digits=4), round(p[2]; digits=4), round(p[3]; digits=4))
         end
@@ -211,7 +338,22 @@ function build_interface_topology(nas_file::String, pidA::Int, pidB::Int;
             end
         end
         
-        # Build coordinate key sets per PID
+        # ====================================================================
+        # Shared Vertex Detection using Rounded Coordinates
+        # ====================================================================
+        # Build coordinate key sets per PID using rounded coordinates.
+        # 
+        # This means vertices that differ by < 0.0001 in any coordinate
+        # will be considered the same vertex (merged by rounding).
+        #
+        # This is intentional for geometric tolerance but creates a 
+        # fundamental inconsistency:
+        # - Shared vertex sets use ROUNDED coordinates
+        # - Triangle structs store ORIGINAL (unrounded) coordinates
+        #
+        # When comparing vertices from these two sources, use tolerance-based
+        # comparison (e.g., are_nodes_equal) rather than exact equality.
+        # ====================================================================
         keyset_A = Set{NTuple{3,Float64}}()
         keyset_B = Set{NTuple{3,Float64}}()
         
@@ -227,7 +369,7 @@ function build_interface_topology(nas_file::String, pidA::Int, pidB::Int;
             end
         end
         
-        # Find shared nodes
+        # Find shared nodes (intersection of rounded coordinate sets)
         shared_keys = intersect(keyset_A, keyset_B)
         
         # Build node ID mapping for shared nodes

@@ -224,6 +224,62 @@ for (i, (a, b)) in enumerate(pairs)
     println(@sprintf("  %2d) PID %d ↔ PID %d", i, a, b))
 end
 
+# -----------------------------------------------------------------------------
+# Phase 0: Vertex Conformity Check (Fundamental Sanity Check)
+# -----------------------------------------------------------------------------
+println("\n" * "="^70)
+println("Phase 0: Checking Vertex Conformity (Fundamental Sanity Check)")
+println("="^70)
+
+vertex_issues_detected = false
+for (idx, (pidA, pidB)) in enumerate(pairs)
+    global vertex_issues_detected
+    topo = build_interface_topology(INPUT_FILE, pidA, pidB)
+    conformity_report = check_vertex_conformity(topo)
+    
+    if !conformity_report.is_acceptable
+        if !vertex_issues_detected
+            println("\n⚠ CRITICAL: Vertex conformity issues detected!")
+            vertex_issues_detected = true
+        end
+        println("\nInterface $idx: PID $pidA ↔ PID $pidB")
+        println("  Status: $(conformity_report.conformity_level)")
+        println("  Vertex match: $(round(conformity_report.vertex_match_ratio * 100, digits=1))%")
+        for issue in conformity_report.issues
+            println("  • $issue")
+        end
+    end
+end
+
+if vertex_issues_detected
+    println("\n" * "="^70)
+    println("ERROR: Cannot proceed with surgical repair.")
+    println("="^70)
+    println()
+    println("One or more interfaces have fundamental vertex conformity issues.")
+    println("This means the meshes do not share the same vertices at their interfaces,")
+    println("which is a prerequisite for any edge-level repair strategy.")
+    println()
+    println("Recommendations:")
+    println("  1. Verify the mesh generation process")
+    println("  2. Check if the meshes were generated with compatible settings")
+    println("  3. Consider remeshing the problematic interfaces")
+    println()
+    println("Use check_vertex_conformity.jl for detailed analysis.")
+    println()
+    cp(INPUT_FILE, OUTPUT_FILE; force=true)
+    exit(1)
+else
+    acceptable_count = length(pairs)
+    println("\n✓ All $acceptable_count interface(s) pass vertex conformity check")
+    println("  → Vertices are properly shared at all interfaces")
+    println("  → Proceeding with edge-level conformity analysis...")
+end
+
+# -----------------------------------------------------------------------------
+# Phase 1+: Edge-Level Analysis and Repair
+# -----------------------------------------------------------------------------
+
 current_file = INPUT_FILE
 total_applied = 0
 
@@ -242,11 +298,20 @@ for (idx, (pidA, pidB)) in enumerate(pairs)
     println("Interface $(idx)/$(length(pairs)): PID $pidA ↔ PID $pidB")
     println("-"^70)
     println(@sprintf("  Conformity before: %.2f%%", topo.conformity_ratio*100))
-    cls = classify_interface_mismatches(topo)
+    
+    # Use bidirectional classification to discover all mismatches from both perspectives
+    cls, cls_AB, cls_BA, class_metrics = classify_interface_mismatches_bidirectional(topo)
+    
     cons = build_boundary_constraints(current_file, pidA, pidB)
-    plan = generate_repair_plan(topo, cls, cons)
+    
+    # Use bidirectional planning to try both source-target orientations
+    plan, tried_both, direction_info = generate_repair_plan_bidirectional(topo, cls, cons)
 
     feas = count(p -> p.is_feasible, plan.insertion_sequence)
+    if tried_both
+        println("\n  Bidirectional result: Selected $(direction_info["chosen_direction"])")
+        println("  Reason: $(direction_info["selection_reason"])")
+    end
     println("  Feasible plans: $feas/$(length(plan.insertion_sequence))")
 
     if feas == 0

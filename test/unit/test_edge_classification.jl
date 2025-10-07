@@ -126,13 +126,16 @@ end
 @testset "Edge Classification - Quad Finding" begin
     # Square ABCD: A(0,0), B(1,0), C(1,1), D(0,1)
     A = (0.0,0.0,Z); B = (1.0,0.0,Z); C = (1.0,1.0,Z); D = (0.0,1.0,Z)
-    # Target side (B) triangulated with diagonal AC
-    t1 = tri(1,2,3,1,A,B,C)   # ABC
-    t2 = tri(1,3,4,2,A,C,D)   # ACD
-    topo = make_topology(facesB=[t1,t2])
-    # We propose diagonal BD
+    # Source side (A) has diagonal BD, target side (B) has diagonal AC
+    t1_source = tri(1,2,4,10,B,A,D)   # BAD (source has BD)
+    t2_source = tri(2,3,4,11,B,C,D)   # BCD (source has BD)
+    t1_target = tri(1,2,3,1,A,B,C)    # ABC (target has AC)
+    t2_target = tri(1,3,4,2,A,C,D)    # ACD (target has AC)
+    topo = make_topology(facesA=[t1_source,t2_source], facesB=[t1_target,t2_target])
+    # Edge BD exists in A, missing in B
     ek_bd = EdgeKey(ckey(B), ckey(D))
-    qverts, to_replace = Nas2Step.find_quad_for_diagonal(ek_bd, topo, topo.pidB)
+    # present_in=:A (edge exists in A), target_pid=pidB (needs to be added to B)
+    qverts, to_replace = Nas2Step.find_quad_for_diagonal(ek_bd, topo, :A, topo.pidB)
     @test length(qverts) == 4
     @test Set(qverts) == Set([ckey(A), ckey(B), ckey(C), ckey(D)])
     @test Set(to_replace) == Set([1,2])
@@ -174,17 +177,23 @@ end
     end
 
     @testset "Diagonal (no hanging nodes)" begin
-        # Target side uses AC, edge BD is missing; no hanging nodes
-        t1 = tri(1,2,3,1,A,B,C)
-        t2 = tri(1,3,4,2,A,C,D)
-        topo_diag = make_topology(facesB=[t1,t2])
+        # Source side (A) has edge BD, target side (B) uses diagonal AC
+        # Source mesh has BD diagonal
+        t1_source = tri(1,2,4,10,B,A,D)   # BAD (source has BD)
+        t2_source = tri(2,3,4,11,B,C,D)   # BCD (source has BD)
+        # Target mesh has AC diagonal
+        t1_target = tri(1,2,3,1,A,B,C)    # ABC (target has AC)
+        t2_target = tri(1,3,4,2,A,C,D)    # ACD (target has AC)
+        topo_diag = make_topology(facesA=[t1_source, t2_source], facesB=[t1_target, t2_target])
+        # Edge BD exists in A, missing in B
         ek_bd = EdgeKey(ckey(B), ckey(D))
-    m = Nas2Step.classify_edge_mismatch(ek_bd, topo_diag, :A)
-    @test m.mismatch_type == Nas2Step.DIAGONAL
+        # Classify as edge present in A, should be added to B
+	m = Nas2Step.classify_edge_mismatch(ek_bd, topo_diag, :A)
+	@test m.mismatch_type == Nas2Step.DIAGONAL
         @test length(m.hanging_nodes) == 0
-        # For diagonal case, affected triangles list (sharing BD) is empty
+        # For diagonal case, affected triangles list (sharing BD in B) is empty
         @test isempty(m.affected_triangles)
-        # But the function should locate the quad and triangles to replace
+        # But the function should locate the quad and triangles to replace in B
         @test length(m.quad_vertices) == 4
         @test Set(m.triangles_to_replace) == Set([1,2])
         # Feasibility false due to no directly affected triangles on target side

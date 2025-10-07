@@ -393,10 +393,14 @@ end
         @test length(plan.old_triangles) == 1
         @test length(plan.replacement_triangles) == 1
 
-        # No affected triangles => nothing
+        # No affected triangles => failed plan
         mismatch2 = EdgeMismatch(tedge, Nas2Step.T_JUNCTION, :B_only, topo.pidA,
                                  NTuple{3,Float64}[], Int[], NTuple{3,Float64}[], Int[], 0.2, 1.0, false)
-    @test Nas2Step.generate_edge_insertion_plan(mismatch2, topo, cons, Nas2Step.default_thresholds()) === nothing
+        plan2 = Nas2Step.generate_edge_insertion_plan(mismatch2, topo, cons, Nas2Step.default_thresholds())
+        @test plan2 isa EdgeInsertionPlan
+        @test plan2.split_type == :failed
+        @test plan2.is_feasible == false
+        @test !isempty(plan2.constraint_violations)
     end
 end
 

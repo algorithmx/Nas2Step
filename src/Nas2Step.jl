@@ -15,11 +15,17 @@ export check_interface_conformity, export_interface_conformity_json, check_inter
 # Phase 1: Enhanced Interface Analysis (Surgical Repair)
 export build_interface_topology, InterfaceTopology, EdgeKey, Triangle, BoundingBox
 export classify_interface_mismatches, InterfaceClassification, EdgeMismatch, MismatchType
+export classify_interface_mismatches_bidirectional  # Strategic improvement: classify from both perspectives
 export build_boundary_constraints, BoundaryConstraints, check_constraint_violations
 export export_interface_topology_json, export_classification_json, export_constraints_json
 
+# Phase 1.0: Vertex Conformity Check (Fundamental Sanity Check)
+export check_vertex_conformity, VertexConformityReport, ConformityLevel
+export print_conformity_report, export_conformity_report_json
+
 # Phase 2: Repair Strategy Generation
 export generate_repair_plan, RepairPlan, EdgeInsertionPlan, QualityThresholds
+export generate_repair_plan_bidirectional  # Strategic improvement: try both directions
 export determine_dominant_side, export_repair_plan_json, default_thresholds
 export export_interface_mismatches_json
 
@@ -45,6 +51,8 @@ include("analyze.jl")
 include("verify.jl")
 
 include("repair/interface_topology.jl")
+include("repair/geometric_utilities.jl")
+include("repair/interface_conformity_check.jl")
 include("repair/edge_classification.jl")
 include("repair/boundary_constraints.jl")
 include("repair/repair_planning.jl")
