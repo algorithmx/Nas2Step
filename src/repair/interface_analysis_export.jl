@@ -1,7 +1,25 @@
 # Comprehensive interface analysis and JSON export
+# ⚠️  DEPRECATED: This module uses the OLD unidirectional classification system.
+#     Use the new symmetric repair system with export_session_report_json() instead.
 
 """
     export_interface_mismatches_json(nas_file::AbstractString, output_file::AbstractString; min_shared::Int=10)
+
+⚠️  **DEPRECATED** - This function uses the old unidirectional classification system.
+
+Please use the new symmetric repair system:
+- Run `repair_mesh.jl` which automatically generates comprehensive JSON reports
+- Or use `export_session_report_json()` from `json_export.jl` for programmatic access
+
+The new system provides:
+- Symmetric bidirectional classification (no more unidirectional bias)
+- Unified mesh generation with boundary verification
+- Comprehensive quality metrics and provenance tracking
+- Session-level and per-interface reports
+
+This function will be removed in a future version.
+
+---
 
 Analyze all volume pairs (PIDs) that share an interface in the given NAS file,
 classify edge mismatches for each interface, compute relevant constraints and
@@ -12,6 +30,18 @@ suggested repair direction, and full mismatch entries (including constraint
 violations and diagonal retriangulation context when available).
 """
 function export_interface_mismatches_json(nas_file::AbstractString, output_file::AbstractString; min_shared::Int=10)
+    @warn """
+    export_interface_mismatches_json() is DEPRECATED.
+    
+    This function uses the old unidirectional classification system.
+    Please use export_session_report_json() with the new symmetric repair system.
+    
+    Migration:
+      OLD: export_interface_mismatches_json("input.nas", "output.json")
+      NEW: Run repair_mesh.jl which generates comprehensive JSON automatically
+    
+    This function will be removed in a future version.
+    """
     isfile(nas_file) || error("NAS file not found: $(nas_file)")
 
     # Discover interface pairs (3D gmsh volume tag pairs sharing >= min_shared nodes)

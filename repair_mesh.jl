@@ -13,6 +13,11 @@ using Nas2Step
 
 using Gmsh
 using Printf
+using Dates
+
+# Include JSON reporting infrastructure
+include("src/repair/json_reporting_types.jl")
+include("src/repair/json_export.jl")
 
 println("="^70)
 println("Mesh Conformity Repair")
@@ -165,7 +170,13 @@ Process all detected interfaces in a single workspace with reduced verbosity.
 ws = Nas2Step.RepairWorkspace(INPUT_FILE)
 total_interfaces_repaired = 0
 
+# Initialize session-level reporting
+session_start = time()
+interface_reports = InterfaceRepairReport[]
+
 for (idx, (pidA, pidB)) in enumerate(pairs)
+    interface_start = time()
+    
     # Build topology from the original file (pre-repair) for accurate classification
     topo = build_interface_topology(INPUT_FILE, pidA, pidB)
     if isapprox(topo.conformity_ratio, 1.0; atol=1e-12)
@@ -195,11 +206,92 @@ for (idx, (pidA, pidB)) in enumerate(pairs)
 
     if !sym_plan.is_feasible
         println("  → Plan not feasible. Skipping.")
+        
+        # Still collect report for failed interface
+        push!(interface_reports, InterfaceRepairReport(
+            (pidA, pidB),
+            topo.conformity_ratio,
+            length(topo.edges_A),
+            length(topo.edges_B),
+            length(topo.faces_A),
+            length(topo.faces_B);
+            success = false,
+            error_message = "Repair plan not feasible",
+            duration_seconds = time() - interface_start,
+            symmetric_mismatches = [serialize_symmetric_mismatch(sm) for sm in sym_mismatches],
+            edges_only_A = sym_result.edges_only_in_A,
+            edges_only_B = sym_result.edges_only_in_B,
+            edges_both = sym_result.edges_in_both,
+            agreement_rate = sym_result.agreement_rate
+        ))
+        
         continue
     end
 
     # Execute symmetric replacement into the shared workspace (reduced verbosity)
     exec_ok = Nas2Step.execute_symmetric_repair!(ws, sym_plan; verbose=false)
+    
+    # Collect post-repair statistics
+    nm_stats = collect_nonmanifold_stats_from_workspace(ws, pidA, pidB)
+    conformity_after_val = compute_conformity_after(ws, pidA, pidB)
+    
+    # Strategy counts
+    use_A_count = count(sm -> sm.repair_strategy == :use_A, sym_mismatches)
+    use_B_count = count(sm -> sm.repair_strategy == :use_B, sym_mismatches)
+    compromise_count = count(sm -> sm.repair_strategy == :compromise, sym_mismatches)
+    skip_count = count(sm -> sm.repair_strategy == :skip, sym_mismatches)
+    
+    # Build interface report
+    push!(interface_reports, InterfaceRepairReport(
+        (pidA, pidB),
+        topo.conformity_ratio,
+        length(topo.edges_A),
+        length(topo.edges_B),
+        length(topo.faces_A),
+        length(topo.faces_B);
+        symmetric_mismatches = [serialize_symmetric_mismatch(sm) for sm in sym_mismatches],
+        edges_only_A = sym_result.edges_only_in_A,
+        edges_only_B = sym_result.edges_only_in_B,
+        edges_both = sym_result.edges_in_both,
+        agreement_rate = sym_result.agreement_rate,
+        edges_use_A = use_A_count,
+        edges_use_B = use_B_count,
+        edges_compromise = compromise_count,
+        edges_skipped = skip_count,
+        unified_triangles = length(sym_plan.target_unified_mesh.triangles),
+        unified_min_quality = sym_plan.target_unified_mesh.min_triangle_quality,
+        unified_total_area = sym_plan.target_unified_mesh.total_area,
+        unified_compatible_A = sym_plan.target_unified_mesh.compatible_with_A,
+        unified_compatible_B = sym_plan.target_unified_mesh.compatible_with_B,
+        nm_total_edges = nm_stats[1],
+        nm_boundary_edges = nm_stats[2],
+        nm_manifold_edges = nm_stats[3],
+        nm_nonmanifold_edges = nm_stats[4],
+        nm_interface_count = nm_stats[5],
+        nm_within_A_count = nm_stats[6],
+        nm_within_B_count = nm_stats[7],
+        nm_max_incidence = nm_stats[8],
+        nm_incidence_distribution = nm_stats[9],
+        bv_loops_A = 0,  # Would need boundary verification integration
+        bv_loops_B = 0,
+        bv_loops_unified = 0,
+        bv_matched_A = 0,
+        bv_matched_B = 0,
+        bv_unmatched_A = 0,
+        bv_unmatched_B = 0,
+        bv_normals_consistent = false,
+        bv_normals_flipped = 0,
+        bv_normals_degenerate = 0,
+        bv_normal_alignment_score = 0.0,
+        success = exec_ok,
+        modifications_count = length(sym_plan.target_unified_mesh.triangles),  # Approximation
+        conformity_after = exec_ok ? conformity_after_val : nothing,
+        error_message = exec_ok ? nothing : "Execution failed",
+        duration_seconds = time() - interface_start,
+        compatibility_issues = sym_plan.target_unified_mesh.compatibility_report,
+        boundary_issues = String[]
+    ))
+    
     if exec_ok
         global total_interfaces_repaired
         total_interfaces_repaired += 1
@@ -218,3 +310,29 @@ else
     println("No repairs applied. Copying input to output unchanged.")
     cp(INPUT_FILE, OUTPUT_FILE; force=true)
 end
+
+# Build and export session report
+session_duration = time() - session_start
+total_modifications = sum(r.modifications_count for r in interface_reports)
+interfaces_repaired_count = count(r -> r.success, interface_reports)
+interfaces_failed = length(interface_reports) - interfaces_repaired_count
+success_rate = length(interface_reports) > 0 ? interfaces_repaired_count / length(interface_reports) : 0.0
+
+session_report = RepairSessionReport(
+    INPUT_FILE,
+    OUTPUT_FILE,
+    string(Dates.now()),
+    length(pairs),
+    length(interface_reports),
+    interfaces_repaired_count,
+    interfaces_failed,
+    success_rate,
+    total_modifications,
+    session_duration,
+    interface_reports
+)
+
+# Export JSON report
+json_output = replace(OUTPUT_FILE, ".nas" => "_repair_report.json")
+export_session_report_json(session_report, json_output)
+println("="^70)

@@ -563,7 +563,23 @@ function verify_mesh_integrity(ws::RepairWorkspace, pidA::Int, pidB::Int)
         end
     end
     
-    # Basic manifoldness check: build edge incidence map with per-PID counts
+    # ========================================================================
+    # CRITICAL: Non-Manifold Edge Analysis
+    # ========================================================================
+    # A manifold edge is incident to exactly 1 (boundary) or 2 (interior) faces.
+    # Non-manifold edges (>2 faces) indicate topology problems that prevent
+    # downstream operations like remeshing, offset, or boolean operations.
+    #
+    # Classification:
+    # - Boundary edges (1 face): Normal for surface boundaries
+    # - Manifold edges (2 faces): Normal interior edges
+    # - Non-manifold edges (>2 faces): PROBLEMS - T-junctions, overlaps, etc.
+    #
+    # For interface repair:
+    # - Interface edges: Expected to transition from 1→2 or 2→2 (conforming)
+    # - Non-manifold at interface: Often caused by misaligned meshes
+    # - Non-manifold within PID: Indicates mesh quality issues
+    
     edge_pid_incidence = Dict{Tuple{Int,Int}, Dict{Int,Int}}()
     
     for pid in (pidA, pidB)
@@ -583,67 +599,95 @@ function verify_mesh_integrity(ws::RepairWorkspace, pidA::Int, pidB::Int)
         end
     end
     
-    # Consolidate and report edges shared by more than 2 faces across both PIDs
-    total_edges_scanned = length(edge_pid_incidence)
-    nonmanifold = Vector{Tuple{Tuple{Int,Int}, Int, Int, Int}}()  # (edge, total, a_cnt, b_cnt)
-    max_inc = 0
-    hist = Dict{Int,Int}()  # incidence -> count
-    dist_a_only = 0
-    dist_b_only = 0
-    dist_both = 0
+    # Analyze edge topology
+    total_edges = length(edge_pid_incidence)
+    boundary_edges = 0    # Incident to 1 face
+    manifold_edges = 0    # Incident to 2 faces  
+    nonmanifold_edges = 0 # Incident to >2 faces
+    
+    # Categorize non-manifold edges by severity and location
+    nm_within_A = 0      # Non-manifold entirely within PID A
+    nm_within_B = 0      # Non-manifold entirely within PID B
+    nm_interface = 0     # Non-manifold at interface (both PIDs involved)
+    max_incidence = 0
+    worst_edge = nothing
+    
+    incidence_histogram = Dict{Int,Int}()  # incidence -> count
     
     for (edge, perpid) in edge_pid_incidence
         a_cnt = get(perpid, pidA, 0)
         b_cnt = get(perpid, pidB, 0)
         total = a_cnt + b_cnt
-        if total > 2
-            push!(nonmanifold, (edge, total, a_cnt, b_cnt))
-            max_inc = max(max_inc, total)
-            hist[total] = get(hist, total, 0) + 1
+        
+        if total == 1
+            boundary_edges += 1
+        elseif total == 2
+            manifold_edges += 1
+        else  # total > 2: non-manifold
+            nonmanifold_edges += 1
+            incidence_histogram[total] = get(incidence_histogram, total, 0) + 1
+            
+            # Categorize by location
             if a_cnt > 0 && b_cnt > 0
-                dist_both += 1
+                nm_interface += 1
             elseif a_cnt > 0
-                dist_a_only += 1
-            elseif b_cnt > 0
-                dist_b_only += 1
+                nm_within_A += 1
+            else
+                nm_within_B += 1
+            end
+            
+            # Track worst case
+            if total > max_incidence
+                max_incidence = total
+                worst_edge = (edge, a_cnt, b_cnt)
             end
         end
     end
     
-    if !isempty(nonmanifold)
-        total_nm = length(nonmanifold)
-        pct_nm = total_edges_scanned > 0 ? round(100 * total_nm / total_edges_scanned, digits=2) : 0.0
-        # Sort examples by descending incidence
-        sort!(nonmanifold; by = x -> x[2], rev = true)
-        sample_n = min(5, total_nm)
-        examples_lines = String[]
-        for i in 1:sample_n
-            e, tot, ac, bc = nonmanifold[i]
-            n1, n2 = e
-            c1 = get(ws.working_nodes, n1, (NaN,NaN,NaN))
-            c2 = get(ws.working_nodes, n2, (NaN,NaN,NaN))
-            mid = ((c1[1]+c2[1])/2, (c1[2]+c2[2])/2, (c1[3]+c2[3])/2)
-            push!(examples_lines, "  • $(e)×$(tot) [A:$(ac), B:$(bc)] mid=$(round.(collect(mid); digits=3))")
-        end
-        remaining = total_nm - sample_n
-        # Build histogram string compactly (e.g., 3→x, 4→y, ...)
-        hist_keys = sort(collect(keys(hist)))
-        hist_items = ["$(k)→$(hist[k])" for k in hist_keys]
-        hist_str = isempty(hist_items) ? "-" : join(hist_items, ", ")
+    # Report non-manifold topology
+    if nonmanifold_edges > 0
+        pct = round(100 * nonmanifold_edges / total_edges, digits=2)
         
-        @warn "Non-manifold edges detected: $(total_nm) ($(pct_nm)% of $(total_edges_scanned)), max incidence=$(max_inc)."
-        println("  Incidence histogram: $(hist_str)")
-        println("  Distribution by side: A-only=$(dist_a_only), B-only=$(dist_b_only), both=$(dist_both)")
-        if !isempty(examples_lines)
-            println("  Examples:")
-            for line in examples_lines
-                println(line)
-            end
-            if remaining > 0
-                println("  ... and $(remaining) more")
+        println("\n  ⚠ Non-Manifold Topology Detected:")
+        println("    Total edges analyzed: $total_edges")
+        println("    └─ Boundary (1 face): $boundary_edges")
+        println("    └─ Manifold (2 faces): $manifold_edges")
+        println("    └─ NON-MANIFOLD (>2 faces): $nonmanifold_edges ($pct%)")
+        
+        println("\n  Non-Manifold Breakdown:")
+        println("    Interface (both PIDs): $nm_interface  ← Interface misalignment")
+        println("    Within PID $pidA only:  $nm_within_A  ← Internal mesh issues")
+        println("    Within PID $pidB only:  $nm_within_B  ← Internal mesh issues")
+        
+        # Show incidence distribution
+        if !isempty(incidence_histogram)
+            sorted_inc = sort(collect(incidence_histogram))
+            println("\n  Incidence Distribution:")
+            for (inc, count) in sorted_inc
+                println("    $inc faces → $count edges")
             end
         end
-        # This is a warning, not an error, as some cases may be valid
+        
+        # Show worst case
+        if worst_edge !== nothing && max_incidence > 4
+            e, ac, bc = worst_edge
+            println("\n  ⚠ Worst case: Edge $e with $max_incidence faces (PID A: $ac, PID B: $bc)")
+        end
+        
+        # Actionable guidance
+        println("\n  Impact: Non-manifold edges may cause:")
+        println("    • Remeshing failures")
+        println("    • Invalid boolean operations")
+        println("    • Incorrect volume calculations")
+        println("    • Visualization artifacts")
+        
+        if nm_interface > nonmanifold_edges * 0.8
+            println("\n  ✓ Most non-manifold edges at interface - expected during repair")
+        elseif nm_within_A > 0 || nm_within_B > 0
+            println("\n  ✗ Non-manifold edges within PIDs - indicates input mesh quality issues")
+        end
+        
+        println()  # Blank line for readability
     end
     
     return true

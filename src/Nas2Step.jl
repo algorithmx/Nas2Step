@@ -42,6 +42,11 @@ export export_symmetric_classification_json, print_symmetric_classification_summ
 export determine_repair_strategy, apply_strategy_selection!
 export analyze_strategy_distribution, print_strategy_analysis, get_high_priority_edges
 
+# Phase 5: Boundary Verification
+export extract_boundary_loops, normalize_loop, compare_loop_sets
+export compute_triangle_normal, verify_normal_consistency, analyze_normal_distribution
+export BoundaryVerificationReport, verify_boundary_consistency
+
 # Phase 3: Surgical Mesh Repair Execution (disabled pending integration)
 # export RepairWorkspace, create_checkpoint!, begin_transaction!, commit_transaction!, rollback_transaction!
 # export delete_face!, add_face!, add_node!, get_face_by_nodes, get_node_id_by_coords
@@ -83,6 +88,7 @@ include("repair/symmetric_strategy_selection.jl")
 # Phase 5: Repair Execution and Validation
 include("repair/repair_workspace.jl")
 include("repair/repair_execution.jl")
+include("repair/boundary_verification.jl")  # Boundary consistency checks
 include("repair/unified_mesh_generation.jl")
 include("repair/repair_validation.jl")
 include("repair/repair_orchestration.jl")
