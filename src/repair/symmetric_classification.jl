@@ -83,7 +83,7 @@ function classify_interface_mismatches_symmetric(
         println("-"^70)
     end
     
-    classification_AB = classify_interface_mismatches(topology, tol=tol, debug=false)
+    classification_AB = classify_interface_mismatches(topology, tol=tol, debug=false, verbose=verbose)
     
     if verbose
         println("  Edges only in A (missing in B): $(length(classification_AB.mismatches_B))")
@@ -124,7 +124,7 @@ function classify_interface_mismatches_symmetric(
         println("-"^70)
     end
     
-    classification_BA = classify_interface_mismatches(topology_swapped, tol=tol, debug=false)
+    classification_BA = classify_interface_mismatches(topology_swapped, tol=tol, debug=false, verbose=verbose)
     
     if verbose
         println("  Edges only in B (missing in A): $(length(classification_BA.mismatches_B))")
@@ -240,6 +240,9 @@ function classify_interface_mismatches_symmetric(
         )
     )
     
+    # Compute interface-local non-manifold edge stats (pre-repair)
+    interface_manifold_stats = compute_interface_nonmanifold_stats(topology)
+
     if verbose
         println("\n" * "="^70)
         println("SYMMETRIC CLASSIFICATION SUMMARY")
@@ -255,6 +258,24 @@ function classify_interface_mismatches_symmetric(
             println("  • Agreement rate: $(round(agreement_rate * 100, digits=1))%")
         end
         
+        # Non-manifold overview (interface scope)
+        if !isempty(interface_manifold_stats)
+            println("\nNon-manifold edges (interface scope):")
+            nm_total = interface_manifold_stats["non_manifold_count"]
+            nm_pct = round(interface_manifold_stats["percent_non_manifold"] * 100, digits=2)
+            max_inc = interface_manifold_stats["max_incidence"]
+            println("  • Count: $nm_total ($nm_pct%)  | max incidence: $max_inc")
+            dist = interface_manifold_stats["overload_distribution"]
+            println("  • Where: A-only=$(get(dist, "A_only", 0)), B-only=$(get(dist, "B_only", 0)), both=$(get(dist, "both", 0))")
+            examples = interface_manifold_stats["top_examples"]
+            if !isempty(examples)
+                # Show up to 5 compact examples
+                shown = join(examples[1:min(5, length(examples))], ", ")
+                suffix = length(examples) > 5 ? ", +$(length(examples)-5) more" : ""
+                println("  • Examples: $shown$suffix")
+            end
+        end
+
         println("="^70)
     end
     
@@ -267,7 +288,8 @@ function classify_interface_mismatches_symmetric(
         edges_only_in_A,
         edges_only_in_B,
         edges_in_both,
-        comparison_metrics
+        comparison_metrics,
+        interface_manifold_stats
     )
 end
 
@@ -406,6 +428,7 @@ function export_symmetric_classification_json(
             "agreement_rate" => round(result.agreement_rate, digits=4)
         ),
         "comparison_metrics" => result.comparison_metrics,
+        "interface_manifold_stats" => result.interface_manifold_stats,
         "symmetric_mismatches" => [
             sym_mismatch_to_dict(sym) 
             for sym in result.symmetric_mismatches[1:min(200, length(result.symmetric_mismatches))]
@@ -460,6 +483,90 @@ function print_symmetric_classification_summary(result::SymmetricClassificationR
     println("  • Compromise: $(counts[:compromise])")
     println("  • Skip: $(counts[:skip])")
     println("  • Pending: $(get(counts, :pending, 0))")
+
+    # Also echo interface-local non-manifold statistics if present
+    if haskey(result.interface_manifold_stats, "non_manifold_count")
+        println("\nInterface Non-manifold Summary:")
+        nm = result.interface_manifold_stats
+        println("  • Non-manifold edges: $(nm["non_manifold_count"]) of $(nm["total_unique_edges"]) (max incidence=$(nm["max_incidence"]))")
+        dist = nm["overload_distribution"]
+        println("  • Distribution: A-only=$(get(dist, "A_only", 0)), B-only=$(get(dist, "B_only", 0)), both=$(get(dist, "both", 0))")
+    end
     
     println("="^70)
+end
+
+# ============================================================================
+# Interface-local non-manifold statistics
+# ============================================================================
+
+"""
+    compute_interface_nonmanifold_stats(topology::InterfaceTopology) -> Dict{String,Any}
+
+Compute non-manifold edge statistics limited to the interface region before any repair.
+We build an edge incidence map for both sides (A and B) using edge maps in the topology.
+An edge is considered non-manifold if its total incidence across both sides exceeds 2.
+
+Returns a dictionary with counts, incidence histogram, distribution, and examples.
+"""
+function compute_interface_nonmanifold_stats(topology::InterfaceTopology)::Dict{String,Any}
+    # Build combined edge incidence from edge->face indices maps
+    incidence = Dict{EdgeKey,Int}()
+    sideA = Set{EdgeKey}()
+    sideB = Set{EdgeKey}()
+    
+    for (ek, faces) in topology.edges_A
+        incidence[ek] = get(incidence, ek, 0) + length(faces)
+        push!(sideA, ek)
+    end
+    for (ek, faces) in topology.edges_B
+        incidence[ek] = get(incidence, ek, 0) + length(faces)
+        push!(sideB, ek)
+    end
+
+    if isempty(incidence)
+        return Dict{String,Any}()
+    end
+
+    # Identify non-manifold edges (>2 incidences)
+    nonmanifold = [(ek, c) for (ek, c) in incidence if c > 2]
+    nn = length(nonmanifold)
+    total_unique = length(incidence)
+    max_incidence = nn > 0 ? maximum(c for (_, c) in nonmanifold) : 0
+
+    # Histogram of incidences (3,4,5,...)
+    hist = Dict{Int,Int}()
+    for (_, c) in nonmanifold
+        hist[c] = get(hist, c, 0) + 1
+    end
+
+    # Where do they occur relative to sides?
+    dist = Dict{String,Int}("A_only"=>0, "B_only"=>0, "both"=>0)
+    for (ek, _) in nonmanifold
+        inA = ek in sideA
+        inB = ek in sideB
+        if inA && inB
+            dist["both"] += 1
+        elseif inA
+            dist["A_only"] += 1
+        elseif inB
+            dist["B_only"] += 1
+        end
+    end
+
+    # Compact examples for printing
+    examples = String[]
+    for (ek, c) in nonmanifold[1:min(10, nn)]
+        push!(examples, "[($(ek.node1[1]),$(ek.node1[2]),$(ek.node1[3]))—($(ek.node2[1]),$(ek.node2[2]),$(ek.node2[3]))]×$(c)")
+    end
+
+    return Dict{String,Any}(
+        "total_unique_edges" => total_unique,
+        "non_manifold_count" => nn,
+        "percent_non_manifold" => total_unique > 0 ? nn/total_unique : 0.0,
+        "max_incidence" => max_incidence,
+        "incidence_histogram" => hist,
+        "overload_distribution" => dist,
+        "top_examples" => examples
+    )
 end

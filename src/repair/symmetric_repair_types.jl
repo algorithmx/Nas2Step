@@ -504,6 +504,17 @@ struct SymmetricClassificationResult
     
     # Detailed comparison metrics
     comparison_metrics::Dict{String,Any}
+
+    # Interface-local manifoldness statistics (pre-repair)
+    # Keys include:
+    # - "total_unique_edges"::Int
+    # - "non_manifold_count"::Int
+    # - "percent_non_manifold"::Float64
+    # - "max_incidence"::Int
+    # - "incidence_histogram"::Dict{Int,Int}
+    # - "overload_distribution"::Dict{String,Int} (A_only, B_only, both)
+    # - "top_examples"::Vector{String}
+    interface_manifold_stats::Dict{String,Any}
 end
 
 # ============================================================================

@@ -1,9 +1,10 @@
 #!/usr/bin/env julia
 """
-Mesh Conformity Repair (straightforward version)
+Mesh Conformity Repair (symmetric unified mesh)
 
-Repairs non-conforming interfaces in a Nastran mesh using the planning
-APIs in Nas2Step and applies quad retriangulation flips directly.
+Repairs non-conforming interfaces in a Nastran mesh using the new symmetric
+pipeline in Nas2Step:
+    topology → symmetric classification → strategy selection → unified mesh → replacement
 
 Usage: julia repair_mesh.jl input.nas output.nas
 """
@@ -44,23 +45,38 @@ println("-"^70)
 """Round a coordinate triple for robust dict keys."""
 ckey(p::NTuple{3,Float64}) = (round(p[1]; digits=4), round(p[2]; digits=4), round(p[3]; digits=4))
 
-"""Build a lookup from rounded coords to node id for a NAS file (single gmsh open)."""
-function build_node_lookup(nas_file::AbstractString)
-    gmsh.initialize()
-    gmsh.option.setNumber("General.Terminal", 0)
-    try
-        gmsh.open(nas_file)
-        tags, coords, _ = gmsh.model.mesh.getNodes()
-        lut = Dict{NTuple{3,Float64},Int}()
-        for (i, tag) in enumerate(tags)
-            j = (i-1)*3
-            p = (coords[j+1], coords[j+2], coords[j+3])
-            lut[ckey(p)] = Int(tag)
+"""
+Write the current workspace's interface surfaces to a NASTRAN surface file (.nas).
+One surface region per PID with CTRIA3 elements. Thickness is set to 1.0 by default.
+"""
+function write_workspace_surfaces!(ws::Nas2Step.RepairWorkspace, out_path::AbstractString)
+    regions = Nas2Step.SurfaceRegion[]
+    # Build one region per PID
+    for (pid, faces) in ws.working_faces
+        # Collect unique points used by this PID's faces
+        point_index = Dict{NTuple{3,Float64}, Int}()
+        points = NTuple{3,Float64}[]
+        triangles = NTuple{3,Int}[]
+        for face_nodes in faces
+            length(face_nodes) == 3 || continue
+            local_ids = Int[]
+            for nid in face_nodes
+                coord = ws.working_nodes[nid]
+                idx = get(point_index, coord, 0)
+                if idx == 0
+                    push!(points, coord)
+                    idx = length(points)
+                    point_index[coord] = idx
+                end
+                push!(local_ids, idx)
+            end
+            push!(triangles, (local_ids[1], local_ids[2], local_ids[3]))
         end
-        return lut
-    finally
-        gmsh.finalize()
+        isempty(triangles) && continue
+        push!(regions, Nas2Step.SurfaceRegion("PID $(pid)", points, triangles, 1.0))
     end
+    Nas2Step.write_nas_surface(out_path, regions)
+    return out_path
 end
 
 """Find all volume tag pairs that share a meaningful set of nodes (potential interfaces)."""
@@ -123,90 +139,7 @@ function find_interface_pairs(nas_file::AbstractString; min_shared::Int=10)
     end
 end
 
-"""Parse a CTRIA3 line; return (eid, pid, n1, n2, n3) or nothing."""
-function parse_ctria3(line::AbstractString)
-    s = strip(line)
-    startswith(s, "CTRIA3") || return nothing
-    tok = split(s)
-    length(tok) < 6 && return nothing
-    try
-        return (
-            eid = parse(Int, tok[2]),
-            pid = parse(Int, tok[3]),
-            n1 = parse(Int, tok[4]),
-            n2 = parse(Int, tok[5]),
-            n3 = parse(Int, tok[6])
-        )
-    catch
-        return nothing
-    end
-end
-
-"""Batch-apply quad retriangulation flips into a new NAS file."""
-function apply_quad_flips_batch!(nas_file::AbstractString,
-                                output_file::AbstractString,
-                                target_pid::Int,
-                                flips::Vector{NamedTuple{(:old_tris,:new_tris),Tuple{Vector{NTuple{3,Int}},Vector{NTuple{3,Int}}}}})
-    lines = readlines(nas_file)
-
-    # Build a set of triangles to delete (unordered nodes)
-    dels = Set{NTuple{3,Int}}()
-    for fl in flips
-        for tri in fl.old_tris
-            vec = [tri[1], tri[2], tri[3]]
-            sort!(vec)
-            nsorted = (vec[1], vec[2], vec[3])
-            push!(dels, nsorted)
-        end
-    end
-
-    kept = String[]
-    deleted = 0
-    for ln in lines
-        info = parse_ctria3(ln)
-        if info === nothing
-            push!(kept, ln)
-            continue
-        end
-        nodes_sorted = sort((info.n1, info.n2, info.n3))
-        if info.pid == target_pid && (nodes_sorted in dels)
-            deleted += 1
-            continue
-        end
-        push!(kept, ln)
-    end
-
-    enddata_idx = findfirst(l -> startswith(l, "\$ENDDATA") || startswith(l, "ENDDATA"), kept)
-    body = enddata_idx === nothing ? kept : kept[1:enddata_idx-1]
-
-    # Find max CTRIA3 element id among kept lines
-    max_eid = 0
-    for ln in body
-        info = parse_ctria3(ln)
-        if info !== nothing
-            max_eid = max(max_eid, info.eid)
-        end
-    end
-
-    # Append new triangles
-    next_eid = max_eid + 1
-    for fl in flips
-        for tri in fl.new_tris
-            push!(body, @sprintf("CTRIA3  %8d%8d%8d%8d%8d", next_eid, target_pid, tri[1], tri[2], tri[3]))
-            next_eid += 1
-        end
-    end
-
-    # Reconstruct final text
-    out = enddata_idx === nothing ? body : vcat(body, kept[enddata_idx:end])
-    open(output_file, "w") do io
-        for ln in out
-            println(io, ln)
-        end
-    end
-
-    return deleted
-end
+# Legacy quad-flip utilities removed in favor of unified symmetric repair
 
 # -----------------------------------------------------------------------------
 # Main
@@ -224,174 +157,64 @@ for (i, (a, b)) in enumerate(pairs)
     println(@sprintf("  %2d) PID %d ↔ PID %d", i, a, b))
 end
 
-# -----------------------------------------------------------------------------
-# Phase 0: Vertex Conformity Check (Fundamental Sanity Check)
-# -----------------------------------------------------------------------------
-println("\n" * "="^70)
-println("Phase 0: Checking Vertex Conformity (Fundamental Sanity Check)")
-println("="^70)
+"""
+Process all detected interfaces in a single workspace with reduced verbosity.
+"""
 
-vertex_issues_detected = false
+# Create one workspace for the original input mesh
+ws = Nas2Step.RepairWorkspace(INPUT_FILE)
+total_interfaces_repaired = 0
+
 for (idx, (pidA, pidB)) in enumerate(pairs)
-    global vertex_issues_detected
+    # Build topology from the original file (pre-repair) for accurate classification
     topo = build_interface_topology(INPUT_FILE, pidA, pidB)
-    conformity_report = check_vertex_conformity(topo)
-    
-    if !conformity_report.is_acceptable
-        if !vertex_issues_detected
-            println("\n⚠ CRITICAL: Vertex conformity issues detected!")
-            vertex_issues_detected = true
-        end
-        println("\nInterface $idx: PID $pidA ↔ PID $pidB")
-        println("  Status: $(conformity_report.conformity_level)")
-        println("  Vertex match: $(round(conformity_report.vertex_match_ratio * 100, digits=1))%")
-        for issue in conformity_report.issues
-            println("  • $issue")
-        end
-    end
-end
-
-if vertex_issues_detected
-    println("\n" * "="^70)
-    println("ERROR: Cannot proceed with surgical repair.")
-    println("="^70)
-    println()
-    println("One or more interfaces have fundamental vertex conformity issues.")
-    println("This means the meshes do not share the same vertices at their interfaces,")
-    println("which is a prerequisite for any edge-level repair strategy.")
-    println()
-    println("Recommendations:")
-    println("  1. Verify the mesh generation process")
-    println("  2. Check if the meshes were generated with compatible settings")
-    println("  3. Consider remeshing the problematic interfaces")
-    println()
-    println("Use check_vertex_conformity.jl for detailed analysis.")
-    println()
-    cp(INPUT_FILE, OUTPUT_FILE; force=true)
-    exit(1)
-else
-    acceptable_count = length(pairs)
-    println("\n✓ All $acceptable_count interface(s) pass vertex conformity check")
-    println("  → Vertices are properly shared at all interfaces")
-    println("  → Proceeding with edge-level conformity analysis...")
-end
-
-# -----------------------------------------------------------------------------
-# Phase 1+: Edge-Level Analysis and Repair
-# -----------------------------------------------------------------------------
-
-current_file = INPUT_FILE
-total_applied = 0
-
-for (idx, (pidA, pidB)) in enumerate(pairs)
-    # Ensure we refer to and update the global bindings in this soft-scope loop
-    global current_file
-    global total_applied
-    # Build topology first to allow early skip for perfect interfaces
-    topo = build_interface_topology(current_file, pidA, pidB)
     if isapprox(topo.conformity_ratio, 1.0; atol=1e-12)
-        # For 100% conformity, print nothing and skip work for this pair
         continue
     end
 
-    println("\n" * "="^70)
+    println("\n" * "="^50)
     println("Interface $(idx)/$(length(pairs)): PID $pidA ↔ PID $pidB")
-    println("-"^70)
     println(@sprintf("  Conformity before: %.2f%%", topo.conformity_ratio*100))
-    
-    # Use bidirectional classification to discover all mismatches from both perspectives
-    cls, cls_AB, cls_BA, class_metrics = classify_interface_mismatches_bidirectional(topo)
-    
-    cons = build_boundary_constraints(current_file, pidA, pidB)
-    
-    # Use bidirectional planning to try both source-target orientations
-    plan, tried_both, direction_info = generate_repair_plan_bidirectional(topo, cls, cons)
 
-    feas = count(p -> p.is_feasible, plan.insertion_sequence)
-    if tried_both
-        println("\n  Bidirectional result: Selected $(direction_info["chosen_direction"])")
-        println("  Reason: $(direction_info["selection_reason"])")
-    end
-    println("  Feasible plans: $feas/$(length(plan.insertion_sequence))")
+    # Symmetric classification (lower verbosity)
+    sym_result = classify_interface_mismatches_symmetric(topo, tol=1e-4, verbose=false)
+    sym_mismatches = sym_result.symmetric_mismatches
+    isempty(sym_mismatches) && continue
 
-    if feas == 0
-        println("  → No feasible repairs for this interface. Skipping.")
+    # Boundary constraints from the original file
+    cons = build_boundary_constraints(INPUT_FILE, pidA, pidB)
+
+    # Build symmetric repair plan (reduced verbosity)
+    sym_plan = Nas2Step.build_symmetric_repair_plan(
+        topo,
+        sym_mismatches,
+        cons;
+        thresholds=default_thresholds(),
+        verbose=false
+    )
+
+    if !sym_plan.is_feasible
+        println("  → Plan not feasible. Skipping.")
         continue
     end
 
-    # We only apply quad retriangulation flips in this script
-    target_pid = plan.repair_direction === :subdivide_A ? pidA : pidB
-
-    # Build node lookup once per current file
-    lut = build_node_lookup(current_file)
-    function tri_coords_to_ids(tri_flat::NTuple{9,Float64})
-        p1 = ckey((tri_flat[1], tri_flat[2], tri_flat[3]))
-        p2 = ckey((tri_flat[4], tri_flat[5], tri_flat[6]))
-        p3 = ckey((tri_flat[7], tri_flat[8], tri_flat[9]))
-        n1 = get(lut, p1, 0); n2 = get(lut, p2, 0); n3 = get(lut, p3, 0)
-        return n1 > 0 && n2 > 0 && n3 > 0 ? (n1, n2, n3) : nothing
+    # Execute symmetric replacement into the shared workspace (reduced verbosity)
+    exec_ok = Nas2Step.execute_symmetric_repair!(ws, sym_plan; verbose=false)
+    if exec_ok
+        global total_interfaces_repaired
+        total_interfaces_repaired += 1
+    else
+        println("  → Execution failed for this interface, continuing to next.")
     end
-
-    flips = NamedTuple{(:old_tris,:new_tris),Tuple{Vector{NTuple{3,Int}},Vector{NTuple{3,Int}}}}[]
-    applied_here = 0
-
-    for p in plan.insertion_sequence
-        if !p.is_feasible || p.split_type != :quad_retriangulation
-            continue
-        end
-
-        # Expect 2 old and 2 replacement triangles for a quad flip
-        if length(p.old_triangles) < 2 || length(p.replacement_triangles) < 2
-            continue
-        end
-
-        old1 = tri_coords_to_ids(p.old_triangles[1])
-        old2 = tri_coords_to_ids(p.old_triangles[2])
-        new1 = tri_coords_to_ids(p.replacement_triangles[1])
-        new2 = tri_coords_to_ids(p.replacement_triangles[2])
-
-        if any(x -> x === nothing, (old1, old2, new1, new2))
-            @warn "  Skipping a plan due to missing node IDs in lookup"
-            continue
-        end
-
-        push!(flips, (old_tris = [old1::NTuple{3,Int}, old2::NTuple{3,Int}],
-                       new_tris = [new1::NTuple{3,Int}, new2::NTuple{3,Int}]))
-        applied_here += 1
-    end
-
-    if isempty(flips)
-        println("  → No applicable quad flips in this plan. Skipping.")
-        continue
-    end
-
-    tmp_out = @sprintf("temp_repair_%03d.nas", idx)
-    deleted = apply_quad_flips_batch!(current_file, tmp_out, target_pid, flips)
-    if deleted == 0
-        println("  → No matching triangles were found to delete. Skipping output swap.")
-        rm(tmp_out; force=true)
-        continue
-    end
-
-    current_file = tmp_out
-    total_applied += applied_here
-
-    # Quick post-check for this interface on the updated file
-    topo_after = build_interface_topology(current_file, pidA, pidB)
-    println(@sprintf("  Conformity after : %.2f%%", topo_after.conformity_ratio*100))
 end
 
 println("\n" * "="^70)
-if total_applied > 0
-    cp(current_file, OUTPUT_FILE; force=true)
-    # Clean up temps
-    for f in readdir(".")
-        startswith(f, "temp_repair_") && endswith(f, ".nas") && rm(f; force=true)
-    end
-    println("Applied $total_applied quad flip(s).")
+if total_interfaces_repaired > 0
+    # Export surfaces for updated workspace (surface-only export)
+    write_workspace_surfaces!(ws, OUTPUT_FILE)
+    println("Repaired $total_interfaces_repaired interface(s). (surface-only export)")
     println("Wrote repaired mesh to: $OUTPUT_FILE")
 else
     println("No repairs applied. Copying input to output unchanged.")
     cp(INPUT_FILE, OUTPUT_FILE; force=true)
 end
-

@@ -382,7 +382,8 @@ function apply_strategy_selection!(
         result.edges_only_in_A,
         result.edges_only_in_B,
         result.edges_in_both,
-        result.comparison_metrics
+        result.comparison_metrics,
+        result.interface_manifold_stats
     )
 end
 
