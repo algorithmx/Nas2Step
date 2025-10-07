@@ -4,7 +4,7 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 
 ## Overview
 
-Nas2Step is a Julia package that converts NASTRAN (.nas) mesh files to STEP CAD files using Gmsh.jl. The package handles both surface-only and volume-only meshes, automatically extracting boundary surfaces from tetrahedral volume meshes when needed.
+Nas2Step is a **Julia package** that converts NASTRAN (.nas) mesh files to STEP CAD files using Gmsh.jl. The package handles both surface-only and volume-only meshes, automatically extracting boundary surfaces from tetrahedral volume meshes when needed.
 
 ## Essential Commands
 
