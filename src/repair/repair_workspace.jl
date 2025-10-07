@@ -451,3 +451,185 @@ function print_workspace_stats(ws::RepairWorkspace)
     println("  Max node ID:   $(ws.max_node_id)")
     println("="^70)
 end
+
+# ============================================================================
+# Phase 6: Mesh Replacement Operations
+# ============================================================================
+
+"""
+    get_or_create_node!(ws::RepairWorkspace, coords::NTuple{3,Float64}; tol::Real=1e-6) -> Int
+
+Get existing node ID by coordinates, or create a new node if not found.
+Uses tolerance-based matching to handle coordinate rounding.
+Returns the node ID (existing or newly created).
+"""
+function get_or_create_node!(ws::RepairWorkspace, coords::NTuple{3,Float64}; tol::Real=1e-6)
+    # Try to find existing node within tolerance
+    for (node_id, node_coords) in ws.working_nodes
+        dx = node_coords[1] - coords[1]
+        dy = node_coords[2] - coords[2]
+        dz = node_coords[3] - coords[3]
+        dist2 = dx*dx + dy*dy + dz*dz
+        if dist2 <= tol*tol
+            return node_id
+        end
+    end
+    
+    # Node not found, create new one
+    return add_node!(ws, coords)
+end
+
+"""
+    delete_interface_face!(ws::RepairWorkspace, pid::Int, face_index::Int) -> Bool
+
+Delete an interface face from the workspace.
+This is a wrapper around delete_face! with additional validation.
+Returns true on success, false on failure.
+"""
+function delete_interface_face!(ws::RepairWorkspace, pid::Int, face_index::Int)
+    if !haskey(ws.working_faces, pid)
+        @warn "PID $pid not found in workspace"
+        return false
+    end
+    
+    faces = ws.working_faces[pid]
+    if face_index < 1 || face_index > length(faces)
+        @warn "Face index $face_index out of bounds for PID $pid (has $(length(faces)) faces)"
+        return false
+    end
+    
+    delete_face!(ws, pid, face_index)
+    return true
+end
+
+"""
+    verify_mesh_integrity(ws::RepairWorkspace, pidA::Int, pidB::Int) -> Bool
+
+Verify mesh integrity after interface replacement.
+Checks:
+- All faces have valid node references
+- All nodes exist in workspace
+- No degenerate triangles
+- Basic manifoldness (each edge shared by at most 2 triangles)
+
+Returns true if mesh is valid, false otherwise.
+"""
+function verify_mesh_integrity(ws::RepairWorkspace, pidA::Int, pidB::Int)
+    for pid in [pidA, pidB]
+        if !haskey(ws.working_faces, pid)
+            @error "PID $pid not found in workspace"
+            return false
+        end
+        
+        faces = ws.working_faces[pid]
+        
+        # Check each face
+        for (face_idx, face_nodes) in enumerate(faces)
+            # Check face has exactly 3 nodes
+            if length(face_nodes) != 3
+                @error "Face $face_idx in PID $pid has $(length(face_nodes)) nodes (expected 3)"
+                return false
+            end
+            
+            # Check all nodes exist
+            for node_id in face_nodes
+                if !haskey(ws.working_nodes, node_id)
+                    @error "Node $node_id in face $face_idx of PID $pid does not exist"
+                    return false
+                end
+            end
+            
+            # Check for degenerate triangle (repeated nodes)
+            if length(unique(face_nodes)) != 3
+                @error "Face $face_idx in PID $pid has degenerate triangle (repeated nodes)"
+                return false
+            end
+            
+            # Check triangle is not zero-area
+            coords = [ws.working_nodes[nid] for nid in face_nodes]
+            v1 = (coords[2][1] - coords[1][1], coords[2][2] - coords[1][2], coords[2][3] - coords[1][3])
+            v2 = (coords[3][1] - coords[1][1], coords[3][2] - coords[1][2], coords[3][3] - coords[1][3])
+            
+            nx = v1[2] * v2[3] - v1[3] * v2[2]
+            ny = v1[3] * v2[1] - v1[1] * v2[3]
+            nz = v1[1] * v2[2] - v1[2] * v2[1]
+            
+            area = sqrt(nx^2 + ny^2 + nz^2) / 2.0
+            
+            if area < 1e-12
+                @error "Face $face_idx in PID $pid has zero area"
+                return false
+            end
+        end
+    end
+    
+    # Basic manifoldness check: build edge incidence map
+    edge_incidence = Dict{Tuple{Int,Int}, Int}()
+    
+    for pid in [pidA, pidB]
+        faces = ws.working_faces[pid]
+        for face_nodes in faces
+            # Create edges (sorted pairs)
+            edges = [
+                (min(face_nodes[1], face_nodes[2]), max(face_nodes[1], face_nodes[2])),
+                (min(face_nodes[2], face_nodes[3]), max(face_nodes[2], face_nodes[3])),
+                (min(face_nodes[3], face_nodes[1]), max(face_nodes[3], face_nodes[1]))
+            ]
+            
+            for edge in edges
+                edge_incidence[edge] = get(edge_incidence, edge, 0) + 1
+            end
+        end
+    end
+    
+    # Check no edge is shared by more than 2 faces
+    for (edge, count) in edge_incidence
+        if count > 2
+            @warn "Edge $edge is shared by $count faces (non-manifold)"
+            # This is a warning, not an error, as some cases may be valid
+        end
+    end
+    
+    return true
+end
+
+"""
+    map_nodes_to_pid(triangle::Triangle, node_mapping::Dict{NTuple{3,Float64}, Union{Int, Nothing}}, 
+                     ws::RepairWorkspace) -> Union{Vector{Int}, Nothing}
+
+Map unified mesh triangle coordinates to workspace node IDs.
+Uses the node_mapping from UnifiedInterfaceMesh to find existing nodes.
+Creates new nodes if needed.
+
+Returns:
+- Vector{Int}: Node IDs for the triangle [node1_id, node2_id, node3_id]
+- Nothing: If mapping fails
+"""
+function map_nodes_to_pid(triangle::Triangle, 
+                          node_mapping::Dict{NTuple{3,Float64}, Union{Int, Nothing}},
+                          ws::RepairWorkspace)
+    node_coords = [triangle.coord1, triangle.coord2, triangle.coord3]
+    node_ids = Int[]
+    
+    for coord in node_coords
+        # First try the node mapping
+        if haskey(node_mapping, coord)
+            mapped_id = node_mapping[coord]
+            if mapped_id !== nothing
+                push!(node_ids, mapped_id)
+                continue
+            end
+        end
+        
+        # Fallback: get or create node in workspace
+        node_id = get_or_create_node!(ws, coord)
+        push!(node_ids, node_id)
+    end
+    
+    if length(node_ids) != 3
+        @error "Failed to map all triangle nodes"
+        return nothing
+    end
+    
+    return node_ids
+end

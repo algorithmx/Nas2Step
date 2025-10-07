@@ -29,6 +29,19 @@ export generate_repair_plan_bidirectional  # Strategic improvement: try both dir
 export determine_dominant_side, export_repair_plan_json, default_thresholds
 export export_interface_mismatches_json
 
+# Phase 2.5: Symmetric Repair Data Structures
+export SymmetricEdgeMismatch, UnifiedInterfaceMesh, SymmetricRepairPlan, SymmetricClassificationResult
+export count_by_strategy, compute_agreement_statistics
+export flatten_triangle, unflatten_triangle
+
+# Phase 3: Symmetric Classification
+export classify_interface_mismatches_symmetric
+export export_symmetric_classification_json, print_symmetric_classification_summary
+
+# Phase 4: Symmetric Strategy Selection
+export determine_repair_strategy, apply_strategy_selection!
+export analyze_strategy_distribution, print_strategy_analysis, get_high_priority_edges
+
 # Phase 3: Surgical Mesh Repair Execution (disabled pending integration)
 # export RepairWorkspace, create_checkpoint!, begin_transaction!, commit_transaction!, rollback_transaction!
 # export delete_face!, add_face!, add_node!, get_face_by_nodes, get_node_id_by_coords
@@ -55,9 +68,23 @@ include("repair/geometric_utilities.jl")
 include("repair/interface_conformity_check.jl")
 include("repair/edge_classification.jl")
 include("repair/boundary_constraints.jl")
+
+# Phase 2: Symmetric Repair Data Structures
+include("repair/symmetric_repair_types.jl")
+
+# Phase 3: Symmetric Classification
+include("repair/symmetric_classification.jl")
+
 include("repair/repair_planning.jl")
+
+# Phase 4: Symmetric Strategy Selection (needs QualityThresholds from repair_planning)
+include("repair/symmetric_strategy_selection.jl")
+
+# Phase 5: Repair Execution and Validation
 include("repair/repair_workspace.jl")
 include("repair/repair_execution.jl")
+include("repair/repair_validation.jl")
+include("repair/repair_orchestration.jl")
 include("repair/repair_verification.jl")
 include("repair/interface_analysis_export.jl")
 

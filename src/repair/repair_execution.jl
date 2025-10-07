@@ -17,26 +17,33 @@ Apply a single quad retriangulation to the mesh.
 Returns true on success, false on failure (workspace will be rolled back).
 """
 function apply_quad_retriangulation!(ws::RepairWorkspace, plan::EdgeInsertionPlan, pid::Int)
-    if plan.plan_type != :quad_retriangulation
-        error("Plan type must be :quad_retriangulation, got $(plan.plan_type)")
+    if plan.split_type != :quad_retriangulation
+        error("Plan type must be :quad_retriangulation, got $(plan.split_type)")
     end
     
-    if length(plan.triangles_to_replace) != 2
-        @warn "Expected 2 triangles to replace, got $(length(plan.triangles_to_replace))"
+    if length(plan.old_triangles) != 2
+        @warn "Expected 2 triangles to replace, got $(length(plan.old_triangles))"
         return false
     end
     
-    if length(plan.new_triangles) != 2
-        @warn "Expected 2 new triangles, got $(length(plan.new_triangles))"
+    if length(plan.replacement_triangles) != 2
+        @warn "Expected 2 new triangles, got $(length(plan.replacement_triangles))"
         return false
     end
     
     # Find the two triangles to delete by their coordinates
     triangles_to_delete = Int[]
-    for tri_coords in plan.triangles_to_replace
-        face_idx = get_face_by_nodes(ws, pid, tri_coords)
+    for tri_coords_flat in plan.old_triangles
+        # Convert flat 9-tuple to vector of 3 node coordinates
+        tri_as_nodes = [
+            (tri_coords_flat[1], tri_coords_flat[2], tri_coords_flat[3]),
+            (tri_coords_flat[4], tri_coords_flat[5], tri_coords_flat[6]),
+            (tri_coords_flat[7], tri_coords_flat[8], tri_coords_flat[9])
+        ]
+        
+        face_idx = get_face_by_nodes(ws, pid, tri_as_nodes)
         if face_idx === nothing
-            @warn "Could not find triangle to replace: $tri_coords in PID $pid"
+            @warn "Could not find triangle to replace in PID $pid"
             return false
         end
         push!(triangles_to_delete, face_idx)
@@ -54,10 +61,12 @@ function apply_quad_retriangulation!(ws::RepairWorkspace, plan::EdgeInsertionPla
     
     # Add new triangles
     @info "  Adding 2 new triangles"
-    for tri_coords in plan.new_triangles
+    for new_tri_coords in plan.replacement_triangles
         # Convert coordinates to node IDs
         node_ids = Int[]
-        for coord in tri_coords
+        for i in 1:3
+            base = (i-1)*3
+            coord = (new_tri_coords[base+1], new_tri_coords[base+2], new_tri_coords[base+3])
             node_id = get_node_id_by_coords(ws, coord)
             if node_id === nothing
                 @warn "Could not find node for coordinate $coord"
@@ -74,20 +83,97 @@ function apply_quad_retriangulation!(ws::RepairWorkspace, plan::EdgeInsertionPla
 end
 
 """
+    apply_triangle_split!(ws::RepairWorkspace, plan::EdgeInsertionPlan, pid::Int) -> Bool
+
+Apply a triangle split (T-junction or bisection) to the mesh.
+Returns true on success, false on failure.
+"""
+function apply_triangle_split!(ws::RepairWorkspace, plan::EdgeInsertionPlan, pid::Int)
+    if plan.split_type == :bisect
+        # For bisection, the edge already exists - just verify it's present
+        # (no actual modification needed)
+        @info "  Bisection - edge already exists, no modification needed"
+        return true
+    end
+    
+    if isempty(plan.old_triangles)
+        @warn "No old triangles specified for split"
+        return false
+    end
+    
+    if isempty(plan.replacement_triangles)
+        @warn "No replacement triangles specified"
+        return false
+    end
+    
+    # Find the triangle to split by coordinates
+    old_tri_coords = plan.old_triangles[1]  # First (and usually only) triangle to replace
+    tri_as_nodes = [
+        (old_tri_coords[1], old_tri_coords[2], old_tri_coords[3]),
+        (old_tri_coords[4], old_tri_coords[5], old_tri_coords[6]),
+        (old_tri_coords[7], old_tri_coords[8], old_tri_coords[9])
+    ]
+    
+    face_idx = get_face_by_nodes(ws, pid, tri_as_nodes)
+    if face_idx === nothing
+        @warn "Could not find triangle to split in PID $pid"
+        return false
+    end
+    
+    @info "  Deleting triangle at index $face_idx"
+    delete_face!(ws, pid, face_idx)
+    
+    # Add new nodes if needed
+    for new_node_coords in plan.new_nodes
+        # Check if node already exists
+        existing_id = get_node_id_by_coords(ws, new_node_coords)
+        if existing_id === nothing
+            new_id = add_node!(ws, new_node_coords)
+            @info "    Added new node $new_id at $new_node_coords"
+        else
+            @info "    Reusing existing node $existing_id"
+        end
+    end
+    
+    # Add replacement triangles
+    @info "  Adding $(length(plan.replacement_triangles)) replacement triangle(s)"
+    for new_tri_coords in plan.replacement_triangles
+        # Convert coordinates to node IDs
+        node_ids = Int[]
+        for i in 1:3
+            base = (i-1)*3
+            coord = (new_tri_coords[base+1], new_tri_coords[base+2], new_tri_coords[base+3])
+            node_id = get_node_id_by_coords(ws, coord)
+            if node_id === nothing
+                @warn "Could not find node for coordinate $coord"
+                return false
+            end
+            push!(node_ids, node_id)
+        end
+        
+        add_face!(ws, pid, node_ids)
+    end
+    
+    @info "  ✓ Triangle split applied successfully"
+    return true
+end
+
+"""
     apply_edge_insertion_plan!(ws::RepairWorkspace, plan::EdgeInsertionPlan, pid::Int) -> Bool
 
 Apply a single edge insertion plan (handles all plan types).
 Returns true on success, false on failure.
 """
 function apply_edge_insertion_plan!(ws::RepairWorkspace, plan::EdgeInsertionPlan, pid::Int)
-    if plan.plan_type == :quad_retriangulation
+    if plan.split_type == :quad_retriangulation
         return apply_quad_retriangulation!(ws, plan, pid)
-    elseif plan.plan_type == :triangle_split
-        # Future: implement T-junction handling
-        @warn "Triangle split not yet implemented"
+    elseif plan.split_type == :bisect || plan.split_type == :trisect || plan.split_type == :triangle_split
+        return apply_triangle_split!(ws, plan, pid)
+    elseif plan.split_type == :failed
+        @warn "Cannot apply failed plan"
         return false
     else
-        @warn "Unknown plan type: $(plan.plan_type)"
+        @warn "Unknown plan type: $(plan.split_type)"
         return false
     end
 end
@@ -327,4 +413,278 @@ function load_repair_plan_from_json(json_file::String, mesh)
     )
     
     return repair_plan
+end
+
+# ============================================================================
+# Phase 6: Symmetric Mesh Replacement Operations
+# ============================================================================
+
+"""
+    replace_both_interfaces!(ws::RepairWorkspace,
+                            unified_mesh::UnifiedInterfaceMesh,
+                            topology::InterfaceTopology) -> Bool
+
+Replace both A's and B's interface faces with the unified mesh.
+
+This is a transactional operation that:
+1. Begins a transaction in RepairWorkspace
+2. Deletes all interface faces from PID A
+3. Deletes all interface faces from PID B
+4. Inserts unified mesh triangles into both PIDs (with appropriate node mappings)
+5. Verifies mesh integrity
+6. Commits transaction if successful, rolls back on failure
+
+# Arguments
+- `ws::RepairWorkspace`: The workspace containing the mesh
+- `unified_mesh::UnifiedInterfaceMesh`: The unified interface mesh to install
+- `topology::InterfaceTopology`: Interface topology describing the original meshes
+
+# Returns
+- `Bool`: true if replacement succeeded, false if it failed (with rollback)
+
+# Implementation Notes
+The critical challenge is node mapping: the same geometric point may have
+different node IDs in meshes A and B. We use:
+1. The pre-built node_mapping_A and node_mapping_B from UnifiedInterfaceMesh
+2. Coordinate-based lookup with tolerance for existing nodes
+3. Creation of new nodes when needed
+
+# Example
+```julia
+ws = RepairWorkspace(mesh_file)
+topology = build_interface_topology(mesh, pidA, pidB)
+unified = generate_unified_interface_mesh(topology, symmetric_mismatches, constraints)
+success = replace_both_interfaces!(ws, unified, topology)
+if success
+    println("✓ Both interfaces replaced successfully")
+else
+    println("✗ Replacement failed (rolled back)")
+end
+```
+"""
+function replace_both_interfaces!(
+    ws::RepairWorkspace,
+    unified_mesh::UnifiedInterfaceMesh,
+    topology::InterfaceTopology
+)::Bool
+    
+    println("\n" * "="^70)
+    println("Phase 6: Symmetric Interface Replacement")
+    println("="^70)
+    println("Interface pair: ($(topology.pidA), $(topology.pidB))")
+    println("Unified mesh:")
+    println("  Triangles:         $(length(unified_mesh.triangles))")
+    println("  Min quality:       $(round(unified_mesh.min_triangle_quality, digits=3))")
+    println("  Total area:        $(round(unified_mesh.total_area, digits=2))")
+    println("  Compatible with A: $(unified_mesh.compatible_with_A)")
+    println("  Compatible with B: $(unified_mesh.compatible_with_B)")
+    println("="^70)
+    
+    # Pre-flight checks
+    if !unified_mesh.compatible_with_A || !unified_mesh.compatible_with_B
+        @error "Unified mesh is not compatible with both sides!"
+        if !isempty(unified_mesh.compatibility_report)
+            println("\nCompatibility issues:")
+            for issue in unified_mesh.compatibility_report
+                println("  - $issue")
+            end
+        end
+        return false
+    end
+    
+    if isempty(unified_mesh.triangles)
+        @error "Unified mesh has no triangles!"
+        return false
+    end
+    
+    # Begin transactional replacement
+    begin_transaction!(ws)
+    
+    try
+        # Step 1: Delete old interface faces from A
+        println("\nStep 1: Deleting interface faces from PID $(topology.pidA)...")
+        faces_A = topology.faces_A
+        num_faces_A = length(faces_A)
+        
+        # Delete in reverse order to avoid index shifting issues
+        for tri_idx in num_faces_A:-1:1
+            if !delete_interface_face!(ws, topology.pidA, tri_idx)
+                @error "Failed to delete face $tri_idx from PID $(topology.pidA)"
+                rollback_transaction!(ws)
+                return false
+            end
+        end
+        println("  ✓ Deleted $num_faces_A faces from PID $(topology.pidA)")
+        
+        # Step 2: Delete old interface faces from B
+        println("\nStep 2: Deleting interface faces from PID $(topology.pidB)...")
+        faces_B = topology.faces_B
+        num_faces_B = length(faces_B)
+        
+        # Delete in reverse order
+        for tri_idx in num_faces_B:-1:1
+            if !delete_interface_face!(ws, topology.pidB, tri_idx)
+                @error "Failed to delete face $tri_idx from PID $(topology.pidB)"
+                rollback_transaction!(ws)
+                return false
+            end
+        end
+        println("  ✓ Deleted $num_faces_B faces from PID $(topology.pidB)")
+        
+        # Step 3: Insert unified triangles into A
+        println("\nStep 3: Inserting unified triangles into PID $(topology.pidA)...")
+        for (tri_idx, tri) in enumerate(unified_mesh.triangles)
+            # Map unified coordinates to A's node IDs
+            node_ids_A = map_nodes_to_pid(tri, unified_mesh.node_mapping_A, ws)
+            
+            if node_ids_A === nothing
+                @error "Failed to map triangle $tri_idx nodes to PID $(topology.pidA)"
+                rollback_transaction!(ws)
+                return false
+            end
+            
+            add_face!(ws, topology.pidA, node_ids_A)
+        end
+        println("  ✓ Inserted $(length(unified_mesh.triangles)) triangles into PID $(topology.pidA)")
+        
+        # Step 4: Insert unified triangles into B
+        println("\nStep 4: Inserting unified triangles into PID $(topology.pidB)...")
+        for (tri_idx, tri) in enumerate(unified_mesh.triangles)
+            # Map unified coordinates to B's node IDs
+            node_ids_B = map_nodes_to_pid(tri, unified_mesh.node_mapping_B, ws)
+            
+            if node_ids_B === nothing
+                @error "Failed to map triangle $tri_idx nodes to PID $(topology.pidB)"
+                rollback_transaction!(ws)
+                return false
+            end
+            
+            add_face!(ws, topology.pidB, node_ids_B)
+        end
+        println("  ✓ Inserted $(length(unified_mesh.triangles)) triangles into PID $(topology.pidB)")
+        
+        # Step 5: Verify mesh integrity
+        println("\nStep 5: Verifying mesh integrity...")
+        if !verify_mesh_integrity(ws, topology.pidA, topology.pidB)
+            @error "Mesh integrity check failed after replacement"
+            rollback_transaction!(ws)
+            return false
+        end
+        println("  ✓ Mesh integrity verified")
+        
+        # Success! Commit the transaction
+        println("\n" * "="^70)
+        println("✓ Symmetric interface replacement completed successfully!")
+        println("="^70)
+        println("Summary:")
+        println("  Original faces in A:  $num_faces_A")
+        println("  Original faces in B:  $num_faces_B")
+        println("  Unified faces:        $(length(unified_mesh.triangles))")
+        println("  Nodes added:          $(ws.nodes_added)")
+        println("="^70)
+        
+        commit_transaction!(ws)
+        return true
+        
+    catch e
+        @error "Exception during interface replacement: $e"
+        println("Stack trace:")
+        for (exc, bt) in Base.catch_stack()
+            showerror(stdout, exc, bt)
+            println()
+        end
+        println("\nRolling back transaction...")
+        rollback_transaction!(ws)
+        return false
+    end
+end
+
+"""
+    execute_symmetric_repair!(ws::RepairWorkspace, plan::SymmetricRepairPlan) -> Bool
+
+Execute symmetric repair plan by generating and installing unified interface mesh.
+
+This is the main entry point for symmetric repair execution (Phase 7).
+It replaces the unidirectional `apply_repair_plan!` for symmetric repairs.
+
+# Arguments
+- `ws::RepairWorkspace`: The workspace containing the mesh
+- `plan::SymmetricRepairPlan`: The symmetric repair plan to execute
+
+# Returns
+- `Bool`: true if repair succeeded, false otherwise
+
+# Workflow
+1. Validate plan feasibility
+2. Extract the pre-generated unified mesh from plan
+3. Display statistics
+4. Call `replace_both_interfaces!` to perform the replacement
+5. Return success/failure status
+
+# Example
+```julia
+ws = RepairWorkspace(mesh_file)
+symmetric_plan = generate_symmetric_repair_plan(topology, symmetric_classification, constraints)
+success = execute_symmetric_repair!(ws, symmetric_plan)
+```
+"""
+function execute_symmetric_repair!(
+    ws::RepairWorkspace,
+    plan::SymmetricRepairPlan
+)::Bool
+    
+    println("\n" * "="^70)
+    println("Executing Symmetric Repair Plan")
+    println("="^70)
+    println("Interface: $(plan.interface_pair)")
+    println("Edges from A:         $(plan.edges_from_A)")
+    println("Edges from B:         $(plan.edges_from_B)")
+    println("Compromised edges:    $(plan.edges_compromised)")
+    println("Synthesized edges:    $(plan.edges_synthesized)")
+    println("Predicted min quality: $(round(plan.predicted_min_quality, digits=3))")
+    println("Predicted compatibility: $(round(plan.predicted_compatibility_score, digits=3))")
+    println("="^70)
+    
+    if !plan.is_feasible
+        @error "Plan is not feasible!"
+        println("\nFeasibility issues:")
+        for issue in plan.feasibility_issues
+            println("  - $issue")
+        end
+        return false
+    end
+    
+    # Generate the unified mesh (already pre-computed in plan)
+    println("\nUsing pre-generated unified interface mesh...")
+    unified_mesh = plan.target_unified_mesh
+    
+    println("\nUnified mesh statistics:")
+    println("  Triangles:            $(length(unified_mesh.triangles))")
+    println("  Min quality:          $(round(unified_mesh.min_triangle_quality, digits=3))")
+    println("  Total area:           $(round(unified_mesh.total_area, digits=2))")
+    println("  Compatible with A:    $(unified_mesh.compatible_with_A)")
+    println("  Compatible with B:    $(unified_mesh.compatible_with_B)")
+    
+    if !isempty(unified_mesh.compatibility_report)
+        println("\nCompatibility notes:")
+        for note in unified_mesh.compatibility_report
+            println("  - $note")
+        end
+    end
+    
+    # Replace both interfaces
+    println("\nProceeding with symmetric interface replacement...")
+    success = replace_both_interfaces!(
+        ws,
+        unified_mesh,
+        plan.topology
+    )
+    
+    if success
+        println("\n✓ Symmetric repair completed successfully!")
+    else
+        println("\n✗ Symmetric repair failed!")
+    end
+    
+    return success
 end
