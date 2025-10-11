@@ -10,6 +10,7 @@ using Test
 using Nas2Step
 using JSON
 using .Nas2StepTestUtils: ckey
+using Nas2Step: create_edge_key_int
 
 
 """
@@ -74,8 +75,8 @@ end
         a = ckey((0.0, 0.0, 0.0))
         b = ckey((1.0, 0.0, 0.0))
         c = ckey((0.0, 1.0, 0.0))
-        ek_ab = EdgeKey(a, b)
-        ek_ac = EdgeKey(a, c)
+        ek_ab = create_edge_key_int(a, b)
+        ek_ac = create_edge_key_int(a, c)
 
         # Case 1: Edge locked
         bc_locked_edge = make_constraints(extA=[ek_ab])
@@ -106,7 +107,7 @@ end
         @test length(bc.corner_nodes) == 2
         @test bc.locked_nodes == bc.corner_nodes
         # Edges incident to these nodes should trigger endpoint violation
-        ek = EdgeKey(p, q)
+        ek = create_edge_key_int(p, q)
         hv, reasons = Nas2Step.check_constraint_violations(ek, bc)
         @test hv
         @test any(occursin("Endpoint node1 is locked", r) for r in reasons) || any(occursin("Endpoint node2 is locked", r) for r in reasons)
@@ -117,7 +118,7 @@ end
     @testset "External Edge Identification (locked union)" begin
         a = ckey((0.0, 0.0, 0.0))
         b = ckey((1.0, 0.0, 0.0))
-        e = EdgeKey(a, b)
+        e = create_edge_key_int(a, b)
         # Mark as external on A and ensure it appears in locked_edges
         bc = make_constraints(extA=[e])
         @test e in bc.pidA_external_edges
@@ -130,7 +131,7 @@ end
         # Small synthetic constraints
         a = ckey((0.0, 0.0, 0.0))
         b = ckey((1.0, 0.0, 0.0))
-        e = EdgeKey(a, b)
+        e = create_edge_key_int(a, b)
         bc = make_constraints(pidA=10, pidB=20, extA=[e], corners=[a])
 
         tmpdir = mktempdir()

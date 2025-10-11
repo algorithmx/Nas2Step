@@ -1,6 +1,9 @@
 # Edge mismatch classification for interface repair
 # Phase 1.2: Classify edge mismatches into repair types
 
+# Import CoordinateKeys module for consistent EdgeKey handling
+using .CoordinateKeys: create_edge_key_int, EdgeKeyInt, convert_to_int, convert_to_float
+
 # Note: geometric_utilities.jl is included by the parent module
 
 # ============================================================================
@@ -135,11 +138,174 @@ struct InterfaceClassification
     average_complexity::Float64
 end
 
-# Backward-compatibility constructor (legacy short signature)
-# InterfaceClassification(topology, mismatches_A, mismatches_B,
-#   t_junction_count, diagonal_count, refinement_count, quad_mismatch_count,
-#   boundary_edge_count, non_manifold_count, average_complexity)
+# ============================================================================
+# New Constructor Interface Design - Clear Parameter Semantics
+# ============================================================================
+
+"""
+    InterfaceClassification(topology, mismatches_A, mismatches_B)
+
+Smart constructor that automatically computes all statistics from the provided mismatch lists.
+This is the RECOMMENDED way to create InterfaceClassification objects.
+
+# Arguments
+- `topology::InterfaceTopology`: The interface topology information
+- `mismatches_A::Vector{EdgeMismatch}`: Edge mismatches missing in mesh A
+- `mismatches_B::Vector{EdgeMismatch}`: Edge mismatches missing in mesh B
+
+# Returns
+- `InterfaceClassification`: Complete classification with auto-computed statistics
+"""
 function InterfaceClassification(
+    topology::InterfaceTopology,
+    mismatches_A::Vector{EdgeMismatch},
+    mismatches_B::Vector{EdgeMismatch}
+)
+    # Count by type (automatically computed)
+    all_mismatches = vcat(mismatches_A, mismatches_B)
+    t_junction_count = count(m -> m.mismatch_type == T_JUNCTION, all_mismatches)
+    diagonal_count = count(m -> m.mismatch_type == DIAGONAL, all_mismatches)
+    refinement_count = count(m -> m.mismatch_type == REFINEMENT, all_mismatches)
+    quad_mismatch_count = count(m -> m.mismatch_type == QUAD_MISMATCH, all_mismatches)
+    boundary_edge_count = count(m -> m.mismatch_type == BOUNDARY_EDGE, all_mismatches)
+    non_manifold_count = count(m -> m.mismatch_type == NON_MANIFOLD, all_mismatches)
+    unshared_endpoint_count = count(m -> m.mismatch_type == UNSHARED_ENDPOINT, all_mismatches)
+    degenerate_edge_count = count(m -> m.mismatch_type == DEGENERATE_EDGE, all_mismatches)
+    source_edge_absent_count = count(m -> m.mismatch_type == SOURCE_EDGE_ABSENT, all_mismatches)
+    quad_not_found_in_source_count = count(m -> m.mismatch_type == QUAD_NOT_FOUND_IN_SOURCE, all_mismatches)
+    target_uses_finer_triangulation_count = count(m -> m.mismatch_type == TARGET_USES_FINER_TRIANGULATION, all_mismatches)
+    unknown_count = count(m -> m.mismatch_type == UNKNOWN, all_mismatches)
+
+    # Repair assessment (automatically computed)
+    feasible_count = count(m -> m.repair_feasible, all_mismatches)
+    infeasible_count = length(all_mismatches) - feasible_count
+    avg_complexity = isempty(all_mismatches) ? 0.0 : sum(m.complexity_score for m in all_mismatches) / length(all_mismatches)
+
+    return InterfaceClassification(
+        topology,
+        mismatches_A,
+        mismatches_B,
+        t_junction_count,
+        diagonal_count,
+        refinement_count,
+        quad_mismatch_count,
+        boundary_edge_count,
+        non_manifold_count,
+        unshared_endpoint_count,
+        degenerate_edge_count,
+        source_edge_absent_count,
+        quad_not_found_in_source_count,
+        target_uses_finer_triangulation_count,
+        unknown_count,
+        feasible_count,
+        infeasible_count,
+        avg_complexity
+    )
+end
+
+"""
+    InterfaceClassification(topology; mismatches_A=[], mismatches_B=[], kwargs...)
+
+Keyword-based constructor for maximum clarity when you need to specify optional parameters.
+
+# Arguments
+- `topology::InterfaceTopology`: The interface topology information
+- `mismatches_A::Vector{EdgeMismatch}`: Edge mismatches missing in mesh A (default: empty)
+- `mismatches_B::Vector{EdgeMismatch}`: Edge mismatches missing in mesh B (default: empty)
+- `t_junction_count::Int`: Count of T-junction mismatches (auto-computed if not provided)
+- `diagonal_count::Int`: Count of diagonal mismatches (auto-computed if not provided)
+- `refinement_count::Int`: Count of refinement mismatches (auto-computed if not provided)
+- `quad_mismatch_count::Int`: Count of quad mismatch types (auto-computed if not provided)
+- `boundary_edge_count::Int`: Count of boundary edge types (auto-computed if not provided)
+- `non_manifold_count::Int`: Count of non-manifold edge types (auto-computed if not provided)
+- `unshared_endpoint_count::Int`: Count of unshared endpoint types (auto-computed if not provided)
+- `degenerate_edge_count::Int`: Count of degenerate edge types (auto-computed if not provided)
+- `source_edge_absent_count::Int`: Count of source edge absent types (auto-computed if not provided)
+- `quad_not_found_in_source_count::Int`: Count of quad not found in source types (auto-computed if not provided)
+- `target_uses_finer_triangulation_count::Int`: Count of target uses finer triangulation types (auto-computed if not provided)
+- `unknown_count::Int`: Count of unknown mismatch types (auto-computed if not provided)
+- `total_feasible::Int`: Count of feasible repairs (auto-computed if not provided)
+- `total_infeasible::Int`: Count of infeasible repairs (auto-computed if not provided)
+- `average_complexity::Float64`: Average complexity score (auto-computed if not provided)
+"""
+function InterfaceClassification(
+    topology::InterfaceTopology;
+    mismatches_A::Vector{EdgeMismatch}=EdgeMismatch[],
+    mismatches_B::Vector{EdgeMismatch}=EdgeMismatch[],
+    t_junction_count::Union{Int,Nothing}=nothing,
+    diagonal_count::Union{Int,Nothing}=nothing,
+    refinement_count::Union{Int,Nothing}=nothing,
+    quad_mismatch_count::Union{Int,Nothing}=nothing,
+    boundary_edge_count::Union{Int,Nothing}=nothing,
+    non_manifold_count::Union{Int,Nothing}=nothing,
+    unshared_endpoint_count::Union{Int,Nothing}=nothing,
+    degenerate_edge_count::Union{Int,Nothing}=nothing,
+    source_edge_absent_count::Union{Int,Nothing}=nothing,
+    quad_not_found_in_source_count::Union{Int,Nothing}=nothing,
+    target_uses_finer_triangulation_count::Union{Int,Nothing}=nothing,
+    unknown_count::Union{Int,Nothing}=nothing,
+    total_feasible::Union{Int,Nothing}=nothing,
+    total_infeasible::Union{Int,Nothing}=nothing,
+    average_complexity::Union{Float64,Nothing}=nothing
+)
+    # Auto-compute missing statistics
+    all_mismatches = vcat(mismatches_A, mismatches_B)
+
+    # Use provided values or auto-compute
+    t_junction_count = t_junction_count !== nothing ? t_junction_count : count(m -> m.mismatch_type == T_JUNCTION, all_mismatches)
+    diagonal_count = diagonal_count !== nothing ? diagonal_count : count(m -> m.mismatch_type == DIAGONAL, all_mismatches)
+    refinement_count = refinement_count !== nothing ? refinement_count : count(m -> m.mismatch_type == REFINEMENT, all_mismatches)
+    quad_mismatch_count = quad_mismatch_count !== nothing ? quad_mismatch_count : count(m -> m.mismatch_type == QUAD_MISMATCH, all_mismatches)
+    boundary_edge_count = boundary_edge_count !== nothing ? boundary_edge_count : count(m -> m.mismatch_type == BOUNDARY_EDGE, all_mismatches)
+    non_manifold_count = non_manifold_count !== nothing ? non_manifold_count : count(m -> m.mismatch_type == NON_MANIFOLD, all_mismatches)
+    unshared_endpoint_count = unshared_endpoint_count !== nothing ? unshared_endpoint_count : count(m -> m.mismatch_type == UNSHARED_ENDPOINT, all_mismatches)
+    degenerate_edge_count = degenerate_edge_count !== nothing ? degenerate_edge_count : count(m -> m.mismatch_type == DEGENERATE_EDGE, all_mismatches)
+    source_edge_absent_count = source_edge_absent_count !== nothing ? source_edge_absent_count : count(m -> m.mismatch_type == SOURCE_EDGE_ABSENT, all_mismatches)
+    quad_not_found_in_source_count = quad_not_found_in_source_count !== nothing ? quad_not_found_in_source_count : count(m -> m.mismatch_type == QUAD_NOT_FOUND_IN_SOURCE, all_mismatches)
+    target_uses_finer_triangulation_count = target_uses_finer_triangulation_count !== nothing ? target_uses_finer_triangulation_count : count(m -> m.mismatch_type == TARGET_USES_FINER_TRIANGULATION, all_mismatches)
+    unknown_count = unknown_count !== nothing ? unknown_count : count(m -> m.mismatch_type == UNKNOWN, all_mismatches)
+
+    feasible_count = total_feasible !== nothing ? total_feasible : count(m -> m.repair_feasible, all_mismatches)
+    infeasible_count = total_infeasible !== nothing ? total_infeasible : length(all_mismatches) - feasible_count
+    avg_complexity = average_complexity !== nothing ? average_complexity : (isempty(all_mismatches) ? 0.0 : sum(m.complexity_score for m in all_mismatches) / length(all_mismatches))
+
+    return InterfaceClassification(
+        topology,
+        mismatches_A,
+        mismatches_B,
+        t_junction_count,
+        diagonal_count,
+        refinement_count,
+        quad_mismatch_count,
+        boundary_edge_count,
+        non_manifold_count,
+        unshared_endpoint_count,
+        degenerate_edge_count,
+        source_edge_absent_count,
+        quad_not_found_in_source_count,
+        target_uses_finer_triangulation_count,
+        unknown_count,
+        feasible_count,
+        infeasible_count,
+        avg_complexity
+    )
+end
+
+"""
+    create_interface_classification_legacy(topology, mismatches_A, mismatches_B,
+        t_junction_count, diagonal_count, refinement_count, quad_mismatch_count,
+        boundary_edge_count, non_manifold_count, average_complexity)
+
+Legacy constructor for backward compatibility.
+
+⚠️  DEPRECATED: This constructor is kept for backward compatibility only.
+    Use `InterfaceClassification(topology, mismatches_A, mismatches_B)` instead,
+    which automatically computes all statistics.
+
+# Arguments
+- Parameters are in the old 11-parameter format for compatibility
+"""
+function create_interface_classification_legacy(
     topology::InterfaceTopology,
     mismatches_A::Vector{EdgeMismatch},
     mismatches_B::Vector{EdgeMismatch},
@@ -151,6 +317,10 @@ function InterfaceClassification(
     non_manifold_count::Int,
     average_complexity::Float64
 )
+    @warn "Using deprecated create_interface_classification_legacy constructor. " *
+          "Use InterfaceClassification(topology, mismatches_A, mismatches_B) instead. " *
+          "This method will be removed in a future version."
+
     all_mismatches = vcat(mismatches_A, mismatches_B)
     feasible_count = count(m -> m.repair_feasible, all_mismatches)
     infeasible_count = length(all_mismatches) - feasible_count
@@ -180,6 +350,40 @@ function InterfaceClassification(
         feasible_count,
         infeasible_count,
         average_complexity,
+    )
+end
+
+# Backward-compatibility constructor (legacy short signature) - DEPRECATED
+# InterfaceClassification(topology, mismatches_A, mismatches_B,
+#   t_junction_count, diagonal_count, refinement_count, quad_mismatch_count,
+#   boundary_edge_count, non_manifold_count, average_complexity)
+function InterfaceClassification(
+    topology::InterfaceTopology,
+    mismatches_A::Vector{EdgeMismatch},
+    mismatches_B::Vector{EdgeMismatch},
+    t_junction_count::Int,
+    diagonal_count::Int,
+    refinement_count::Int,
+    quad_mismatch_count::Int,
+    boundary_edge_count::Int,
+    non_manifold_count::Int,
+    average_complexity::Float64
+)
+    @warn "Using deprecated InterfaceClassification constructor with positional arguments. " *
+          "Use InterfaceClassification(topology, mismatches_A, mismatches_B) instead. " *
+          "This method will be removed in a future version."
+
+    return create_interface_classification_legacy(
+        topology,
+        mismatches_A,
+        mismatches_B,
+        t_junction_count,
+        diagonal_count,
+        refinement_count,
+        quad_mismatch_count,
+        boundary_edge_count,
+        non_manifold_count,
+        average_complexity
     )
 end
 
@@ -222,7 +426,8 @@ function point_on_segment(p::NTuple{3,Float64},
     dist2 = dp[1]^2 + dp[2]^2 + dp[3]^2
     
     # Check if interior point (not endpoint)
-    is_interior = (t > 1e-6) && (t < 1.0 - 1e-6)
+    # Use stricter threshold to avoid treating near-endpoint points as hanging nodes
+    is_interior = (t > 1e-3) && (t < 1.0 - 1e-3)
     is_on = (dist2 <= tol^2) && is_interior
     
     return (is_on, t, dist2)
@@ -233,43 +438,51 @@ end
 
 Find all nodes that lie on the given edge (excluding endpoints).
 """
-function find_hanging_nodes_on_edge(edge::EdgeKey, 
-                                   nodes::Set{NTuple{3,Float64}}; 
+function find_hanging_nodes_on_edge(edge::EdgeKey,
+                                   nodes::Set{NTuple{3,Float64}};
                                    tol::Real=1e-4)::Vector{NTuple{3,Float64}}
-    
+
     hanging = NTuple{3,Float64}[]
-    
+
+    # Convert EdgeKey integer coordinates to float coordinates for geometric calculations
+    # Do this once outside the loop to avoid scope issues
+    edge_int1 = edge.node1
+    edge_int2 = edge.node2
+    edge_coord1 = convert_to_float(edge_int1)
+    edge_coord2 = convert_to_float(edge_int2)
+
     for node in nodes
         # Skip if node is an endpoint
         # NOTE: EdgeKey coordinates are rounded to 4 digits during topology construction,
         # but Triangle coordinates are not. We need to check both:
         # 1) Exact match (for perfect coordinate matches)
         # 2) Coordinate rounding match (for coordinates that round to the same value)
-        
-        # Helper: round coordinate to 4 digits (matching EdgeKey rounding)
-        round_coord(c) = (round(c[1], digits=4), round(c[2], digits=4), round(c[3], digits=4))
-        
-        is_endpoint = (node == edge.node1) || (node == edge.node2) ||
-                     (round_coord(node) == edge.node1) || (round_coord(node) == edge.node2)
-        
+
+        # Convert node coordinates to integer keys for comparison
+        # Using user's preferred approach: convert to integer and compare element-wise
+        node_int = convert_to_int(node)
+
+        is_endpoint = (node_int == edge_int1) || (node_int == edge_int2)
+
         if is_endpoint
             continue
         end
-        
-        is_on, t, _ = point_on_segment(node, edge.node1, edge.node2, tol=tol)
+
+        # Check if node lies on the edge
+        is_on, t, _ = point_on_segment(node, edge_coord1, edge_coord2, tol=tol)
         if is_on
             push!(hanging, node)
         end
     end
-    
+
     # Sort by parameter t for consistent ordering
     if !isempty(hanging)
         sort!(hanging, by = n -> begin
-            _, t, _ = point_on_segment(n, edge.node1, edge.node2, tol=tol)
+            _, t, _ = point_on_segment(n, edge_coord1, edge_coord2, tol=tol)
             t
         end)
     end
-    
+
     return hanging
 end
 
@@ -316,15 +529,36 @@ end
     are_nodes_equal(node1, node2; tol=1e-4)
 
 Check if two nodes are equal within a given tolerance.
+Handles both float and integer coordinate tuples.
 """
-function are_nodes_equal(node1::NTuple{3,Float64}, 
-                         node2::NTuple{3,Float64}; 
+function are_nodes_equal(node1::NTuple{3,Float64},
+                         node2::NTuple{3,Float64};
                          tol::Real=1e-4)::Bool
     dx = node1[1] - node2[1]
     dy = node1[2] - node2[2]
     dz = node1[3] - node2[3]
     dist2 = dx*dx + dy*dy + dz*dz
     return dist2 <= tol*tol
+end
+
+# Handle integer coordinates by converting to float
+function are_nodes_equal(node1::NTuple{3,Int},
+                         node2::NTuple{3,Int};
+                         tol::Real=1e-4)::Bool
+    return are_nodes_equal(convert_to_float(node1), convert_to_float(node2), tol=tol)
+end
+
+# Handle mixed integer/float coordinates
+function are_nodes_equal(node1::NTuple{3,Float64},
+                         node2::NTuple{3,Int};
+                         tol::Real=1e-4)::Bool
+    return are_nodes_equal(node1, convert_to_float(node2), tol=tol)
+end
+
+function are_nodes_equal(node1::NTuple{3,Int},
+                         node2::NTuple{3,Float64};
+                         tol::Real=1e-4)::Bool
+    return are_nodes_equal(convert_to_float(node1), node2, tol=tol)
 end
 
 """
@@ -370,9 +604,9 @@ function extract_quad_boundary_edges(
     # Get all edges from both triangles
     function get_triangle_edges(tri::Triangle)::Vector{EdgeKey}
         return [
-            EdgeKey(tri.coord1, tri.coord2),
-            EdgeKey(tri.coord2, tri.coord3),
-            EdgeKey(tri.coord3, tri.coord1)
+            create_edge_key_int(tri.coord1, tri.coord2),
+            create_edge_key_int(tri.coord2, tri.coord3),
+            create_edge_key_int(tri.coord3, tri.coord1)
         ]
     end
     
@@ -455,7 +689,7 @@ end
     find_triangles_with_edge(edge, faces; tol=1e-4)
 
 Find all triangles in a face list that contain a specific edge (both vertices).
-Returns indices of triangles that have both edge.node1 and edge.node2 as vertices.
+Returns indices of triangles that have both edge coordinates as vertices.
 """
 function find_triangles_with_edge(
     edge::EdgeKey,
@@ -464,9 +698,13 @@ function find_triangles_with_edge(
 )::Vector{Int}
     triangles_with_edge = Int[]
     
+    # Convert EdgeKey integer coordinates back to float for geometric calculations
+    edge_coord1 = convert_to_float(edge.node1)
+    edge_coord2 = convert_to_float(edge.node2)
+
     for (idx, tri) in enumerate(faces)
-        has_node1 = triangle_has_node(tri, edge.node1, tol=tol)
-        has_node2 = triangle_has_node(tri, edge.node2, tol=tol)
+        has_node1 = triangle_has_node(tri, edge_coord1, tol=tol)
+        has_node2 = triangle_has_node(tri, edge_coord2, tol=tol)
         
         if has_node1 && has_node2
             push!(triangles_with_edge, idx)
@@ -596,7 +834,7 @@ function find_quad_for_diagonal(
     
     if debug
         println("\n  [DEBUG] Finding quad for diagonal edge (SOURCE-FIRST):")
-        println("    Edge: $(edge.node1) → $(edge.node2)")
+        println("    Edge: $edge_coord1 -> $edge_coord2")
         println("    Present in: $present_in (PID $source_pid)")
         println("    Target PID: $target_pid")
         println("    Source faces: $(length(source_faces))")
@@ -681,14 +919,14 @@ function find_quad_for_diagonal(
         
         # Find the diagonal in target (different from source diagonal)
         target_edges1 = [
-            EdgeKey(target_tri1.coord1, target_tri1.coord2),
-            EdgeKey(target_tri1.coord2, target_tri1.coord3),
-            EdgeKey(target_tri1.coord3, target_tri1.coord1)
+            create_edge_key_int(target_tri1.coord1, target_tri1.coord2),
+            create_edge_key_int(target_tri1.coord2, target_tri1.coord3),
+            create_edge_key_int(target_tri1.coord3, target_tri1.coord1)
         ]
         target_edges2 = [
-            EdgeKey(target_tri2.coord1, target_tri2.coord2),
-            EdgeKey(target_tri2.coord2, target_tri2.coord3),
-            EdgeKey(target_tri2.coord3, target_tri2.coord1)
+            create_edge_key_int(target_tri2.coord1, target_tri2.coord2),
+            create_edge_key_int(target_tri2.coord2, target_tri2.coord3),
+            create_edge_key_int(target_tri2.coord3, target_tri2.coord1)
         ]
         
         # Find common edge (the target diagonal)
@@ -775,9 +1013,13 @@ function classify_edge_mismatch(edge::EdgeKey,
     end
     
     # EARLY CHECK 0: Check if edge is degenerate (zero or near-zero length)
-    dx = edge.node2[1] - edge.node1[1]
-    dy = edge.node2[2] - edge.node1[2]
-    dz = edge.node2[3] - edge.node1[3]
+    # Convert EdgeKey integer coordinates back to float for geometric calculations
+    edge_coord1 = convert_to_float(edge.node1)
+    edge_coord2 = convert_to_float(edge.node2)
+
+    dx = edge_coord2[1] - edge_coord1[1]
+    dy = edge_coord2[2] - edge_coord1[2]
+    dz = edge_coord2[3] - edge_coord1[3]
     edge_length = sqrt(dx*dx + dy*dy + dz*dz)
     
     if edge_length < tol
@@ -808,12 +1050,12 @@ function classify_edge_mismatch(edge::EdgeKey,
     # Also consider shared node keys (already rounded) as candidate nodes
     # Tests may inject hanging nodes via shared_node_keys only
     for k in topology.shared_node_keys
-        push!(target_nodes, k)
+        push!(target_nodes, convert_to_float(k))
     end
     
     if debug
         println("  [DEBUG] Searching for hanging nodes:")
-        println("    Edge: $(edge.node1) -> $(edge.node2)")
+        println("    Edge: $edge_coord1 -> $edge_coord2")
         println("    Present in: $present_in")
         println("    Edge length: $edge_length")
         println("    Target side has $(length(target_nodes)) vertices")
@@ -885,8 +1127,8 @@ function classify_edge_mismatch(edge::EdgeKey,
             shared_vertices = compute_shared_vertices(vertices_A, vertices_B, tol=tol)
             
             # Check if both endpoints are in the shared vertex set
-            endpoint1_shared = is_vertex_in_set(edge.node1, shared_vertices, tol=tol)
-            endpoint2_shared = is_vertex_in_set(edge.node2, shared_vertices, tol=tol)
+            endpoint1_shared = is_vertex_in_set(edge_coord1, shared_vertices, tol=tol)
+            endpoint2_shared = is_vertex_in_set(edge_coord2, shared_vertices, tol=tol)
             
             # EARLY CHECK 2: Are both endpoints shared?
             if !endpoint1_shared || !endpoint2_shared
@@ -987,15 +1229,24 @@ function classify_edge_mismatch(edge::EdgeKey,
         end
     end
     
-    # Find affected triangles in target side
+    # Find affected triangles
+    # Strategy depends on mismatch type:
+    # - T-Junction: split triangles in source mesh (where edge exists) to insert hanging nodes
+    # - Diagonal: replace triangles in target mesh (where edge is missing) with new triangulation
     affected_triangle_indices = Int[]
     min_quality = 1.0
-    
-    for (idx, tri) in enumerate(target_faces)
+
+    # Determine which mesh to search based on mismatch type
+    # We'll determine the actual mismatch type later, so use preliminary logic
+    search_in_source = length(hanging) > 0  # T-junctions have hanging nodes, diagonals don't
+
+    faces_to_search = search_in_source ? source_faces : target_faces
+
+    for (idx, tri) in enumerate(faces_to_search)
         # Check if this triangle's vertices include both endpoints of the edge
-        has_node1 = triangle_has_node(tri, edge.node1, tol=tol)
-        has_node2 = triangle_has_node(tri, edge.node2, tol=tol)
-        
+        has_node1 = triangle_has_node(tri, edge_coord1, tol=tol)
+        has_node2 = triangle_has_node(tri, edge_coord2, tol=tol)
+
         if has_node1 && has_node2
             push!(affected_triangle_indices, idx)
             quality = compute_triangle_quality(tri)
@@ -1025,8 +1276,8 @@ function classify_edge_mismatch(edge::EdgeKey,
         vertices_A = extract_boundary_vertices(topology.faces_A)
         vertices_B = extract_boundary_vertices(topology.faces_B)
         shared_vertices = compute_shared_vertices(vertices_A, vertices_B, tol=tol)
-        endpoint1_shared = is_vertex_in_set(edge.node1, shared_vertices, tol=tol)
-        endpoint2_shared = is_vertex_in_set(edge.node2, shared_vertices, tol=tol)
+        endpoint1_shared = is_vertex_in_set(edge_coord1, shared_vertices, tol=tol)
+        endpoint2_shared = is_vertex_in_set(edge_coord2, shared_vertices, tol=tol)
         
         tried_quad = source_triangle_count == 2 && endpoint1_shared && endpoint2_shared
         quad_found = !isempty(quad_vertices)
@@ -1153,21 +1404,54 @@ function classify_interface_mismatches(topology::InterfaceTopology;
     end
     
     if verbose
-        println("  Classification complete:")
-        println("    T-junctions: $t_junction_count")
-        println("    Diagonal mismatches: $diagonal_count")
-        println("    Refinement differences: $refinement_count")
-        println("    Quad mismatches: $quad_mismatch_count")
-        println("    Boundary edges: $boundary_edge_count")
-        println("    Non-manifold: $non_manifold_count")
-        println("    Unshared endpoints: $unshared_endpoint_count")
-        println("    Degenerate edges: $degenerate_edge_count")
-        println("    Source edge absent: $source_edge_absent_count")
-        println("    Quad not found in source: $quad_not_found_in_source_count")
-        println("    Target uses finer triangulation: $target_uses_finer_triangulation_count")
-        println("    Unknown: $unknown_count")
-        println("    Feasible for repair: $feasible_count / $(length(all_mismatches))")
-        println("    Average complexity: $(round(avg_complexity, digits=2))")
+        # Check if there are any mismatches to report
+        has_any_mismatches = length(all_mismatches) > 0
+
+        if has_any_mismatches
+            println("  Classification complete:")
+
+            # Only show categories with non-zero counts
+            if t_junction_count > 0
+                println("    T-junctions: $t_junction_count")
+            end
+            if diagonal_count > 0
+                println("    Diagonal mismatches: $diagonal_count")
+            end
+            if refinement_count > 0
+                println("    Refinement differences: $refinement_count")
+            end
+            if quad_mismatch_count > 0
+                println("    Quad mismatches: $quad_mismatch_count")
+            end
+            if boundary_edge_count > 0
+                println("    Boundary edges: $boundary_edge_count")
+            end
+            if non_manifold_count > 0
+                println("    Non-manifold: $non_manifold_count")
+            end
+            if unshared_endpoint_count > 0
+                println("    Unshared endpoints: $unshared_endpoint_count")
+            end
+            if degenerate_edge_count > 0
+                println("    Degenerate edges: $degenerate_edge_count")
+            end
+            if source_edge_absent_count > 0
+                println("    Source edge absent: $source_edge_absent_count")
+            end
+            if quad_not_found_in_source_count > 0
+                println("    Quad not found in source: $quad_not_found_in_source_count")
+            end
+            if target_uses_finer_triangulation_count > 0
+                println("    Target uses finer triangulation: $target_uses_finer_triangulation_count")
+            end
+            if unknown_count > 0
+                println("    Unknown: $unknown_count")
+            end
+
+            # Always show repair feasibility and complexity when there are mismatches
+            println("    Feasible for repair: $feasible_count / $(length(all_mismatches))")
+            println("    Average complexity: $(round(avg_complexity, digits=2))")
+        end
     end
     
     return InterfaceClassification(
@@ -1278,7 +1562,8 @@ function classify_interface_mismatches_bidirectional(
         topology.total_faces_A,
         topology.total_edges_B,        # Swap edge counts
         topology.total_edges_A,
-        topology.conformity_ratio      # Conformity ratio remains the same
+        topology.conformity_ratio,     # Conformity ratio remains the same
+        0.0, 0.0, 0, 1.0            # consistency metrics: max_vertex_dist, mean_vertex_dist, edge_mismatch_count, triangulation_similarity
     )
     
     classification_BA = classify_interface_mismatches(topology_swapped, tol=tol, debug=false)

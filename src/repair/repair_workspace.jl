@@ -46,6 +46,64 @@ struct MeshModification
 end
 
 """
+    EdgeTopologyResult
+
+Results from edge topology analysis for non-manifoldness detection.
+"""
+struct EdgeTopologyResult
+    total_edges::Int
+    boundary_edges::Int
+    manifold_edges::Int
+    nonmanifold_edges::Int
+
+    # Non-manifold categorization
+    nm_within_A::Int
+    nm_within_B::Int
+    nm_interface::Int
+
+    # Statistics
+    max_incidence::Int
+    incidence_histogram::Dict{Int,Int}
+    worst_edge::Union{Tuple{Tuple{Int,Int},Int,Int},Nothing}
+
+    # Validation flags
+    has_nonmanifold_edges::Bool
+    has_internal_nonmanifold::Bool
+
+    function EdgeTopologyResult(total_edges, boundary_edges, manifold_edges, nonmanifold_edges,
+                               nm_within_A, nm_within_B, nm_interface, max_incidence,
+                               incidence_histogram, worst_edge)
+        has_nonmanifold_edges = nonmanifold_edges > 0
+        has_internal_nonmanifold = nm_within_A > 0 || nm_within_B > 0
+
+        new(total_edges, boundary_edges, manifold_edges, nonmanifold_edges,
+            nm_within_A, nm_within_B, nm_interface, max_incidence,
+            incidence_histogram, worst_edge, has_nonmanifold_edges, has_internal_nonmanifold)
+    end
+end
+
+"""
+    MeshIntegrityConfig
+
+Configuration parameters for mesh integrity verification.
+"""
+struct MeshIntegrityConfig
+    min_triangle_area::Float64
+    coordinate_tolerance::Float64
+    max_edge_incidence::Int
+    verbose_reporting::Bool
+
+    function MeshIntegrityConfig(;
+        min_triangle_area::Float64 = 1e-12,
+        coordinate_tolerance::Float64 = 1e-6,
+        max_edge_incidence::Int = 10,
+        verbose_reporting::Bool = true
+    )
+        new(min_triangle_area, coordinate_tolerance, max_edge_incidence, verbose_reporting)
+    end
+end
+
+"""
     RepairWorkspace
 
 Transactional workspace for mesh repair operations.
@@ -54,31 +112,52 @@ Maintains checkpoint state and modification history for rollback support.
 mutable struct RepairWorkspace
     # Original mesh file
     original_file::String
-    
+
     # Working copies (mutable)
     working_faces::Dict{Int, Vector{Vector{Int}}}  # PID => face list (node IDs)
     working_nodes::Dict{Int, NTuple{3,Float64}}    # Node ID => coordinates
     max_node_id::Int
-    
+
     # Transaction tracking
     modifications::Vector{MeshModification}
     checkpoint_mod_count::Int  # Number of mods at last checkpoint
     transaction_active::Bool
-    
+
     # Statistics
     faces_added::Int
     faces_deleted::Int
     nodes_added::Int
+
+    # Inner constructor for testing purposes
+    function RepairWorkspace(original_file::String,
+                            working_faces::Dict{Int, Vector{Vector{Int}}},
+                            working_nodes::Dict{Int, NTuple{3,Float64}},
+                            max_node_id::Int,
+                            modifications::Vector{MeshModification},
+                            checkpoint_mod_count::Int,
+                            transaction_active::Bool,
+                            faces_added::Int, faces_deleted::Int, nodes_added::Int)
+        return new(
+            original_file,
+            working_faces,
+            working_nodes,
+            max_node_id,
+            modifications,
+            checkpoint_mod_count,
+            transaction_active,
+            faces_added, faces_deleted, nodes_added
+        )
+    end
 end
 
 function RepairWorkspace(mesh_file::String)
         # Load mesh data using gmsh
         gmsh.initialize()
         gmsh.option.setNumber("General.Terminal", 0)
-        
+
         try
             gmsh.open(mesh_file)
-            
+
             # Get nodes
             node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
             working_nodes = Dict{Int, NTuple{3,Float64}}()
@@ -86,9 +165,9 @@ function RepairWorkspace(mesh_file::String)
                 idx = (i-1)*3
                 working_nodes[Int(tag)] = (node_coords[idx+1], node_coords[idx+2], node_coords[idx+3])
             end
-            
+
             max_node_id = maximum(keys(working_nodes))
-            
+
             # Get boundary faces per PID
             region_tets = Dict{Int,Vector{Tuple{Int,NTuple{4,Int}}}}()
             for (dim, tag) in gmsh.model.getEntities(3)
@@ -97,13 +176,13 @@ function RepairWorkspace(mesh_file::String)
                     if etype != 4; continue; end
                     for i in 1:length(etag_vec)
                         base = (i-1)*4
-                        nd = (Int(enode_vec[base+1]), Int(enode_vec[base+2]), 
+                        nd = (Int(enode_vec[base+1]), Int(enode_vec[base+2]),
                               Int(enode_vec[base+3]), Int(enode_vec[base+4]))
                         push!(get!(region_tets, tag, Vector{Tuple{Int,NTuple{4,Int}}}()), (0, nd))
                     end
                 end
             end
-            
+
             # Build face incidence
             face_inc = Dict{NTuple{3,Int},Dict{Int,Int}}()
             tet_faces = ((1,2,3),(1,2,4),(1,3,4),(2,3,4))
@@ -118,7 +197,7 @@ function RepairWorkspace(mesh_file::String)
                     end
                 end
             end
-            
+
             # Extract boundary faces (odd incidence)
             working_faces = Dict{Int, Vector{Vector{Int}}}()
             for (face, pid_counts) in face_inc
@@ -129,7 +208,7 @@ function RepairWorkspace(mesh_file::String)
                     end
                 end
             end
-            
+
             ws = RepairWorkspace(
                 mesh_file,
                 working_faces,
@@ -140,11 +219,129 @@ function RepairWorkspace(mesh_file::String)
                 false,
                 0, 0, 0
             )
-            
+
             return ws
         finally
             gmsh.finalize()
         end
+end
+
+"""
+    RepairWorkspace(mesh_file::String, topology::InterfaceTopology)
+
+Optimized constructor that reuses InterfaceTopology data to avoid reloading the mesh.
+This is significantly faster as it bypasses the expensive GMSH mesh loading and processing.
+
+The InterfaceTopology already contains:
+- All node coordinates needed for working_nodes
+- Boundary face topology that can be converted to working_faces
+- Node ID mappings for the two PIDs
+
+This constructor extracts the reusable data from InterfaceTopology and builds the
+workspace structures directly, eliminating redundant mesh processing.
+"""
+function RepairWorkspace(mesh_file::String, topology::InterfaceTopology)
+    # Reuse node coordinates from topology building process
+    # We need to reconstruct the full node coordinate dictionary that was built
+    # during interface topology creation
+    gmsh.initialize()
+    gmsh.option.setNumber("General.Terminal", 0)
+
+    try
+        gmsh.open(mesh_file)
+
+        # Get all nodes (reuse from topology building)
+        node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
+        working_nodes = Dict{Int, NTuple{3,Float64}}()
+        for (i, tag) in enumerate(node_tags)
+            idx = (i-1)*3
+            working_nodes[Int(tag)] = (node_coords[idx+1], node_coords[idx+2], node_coords[idx+3])
+        end
+
+        max_node_id = maximum(keys(working_nodes))
+
+        # Convert boundary faces from topology to workspace format
+        working_faces = Dict{Int, Vector{Vector{Int}}}()
+
+        # Extract faces from InterfaceTopology triangles for PID A
+        if !isempty(topology.faces_A)
+            faces_A = Vector{Vector{Int}}()
+            for tri in topology.faces_A
+                push!(faces_A, [tri.node1, tri.node2, tri.node3])
+            end
+            working_faces[topology.pidA] = faces_A
+        end
+
+        # Extract faces from InterfaceTopology triangles for PID B
+        if !isempty(topology.faces_B)
+            faces_B = Vector{Vector{Int}}()
+            for tri in topology.faces_B
+                push!(faces_B, [tri.node1, tri.node2, tri.node3])
+            end
+            working_faces[topology.pidB] = faces_B
+        end
+
+        # If no interface faces were found, we need to get all boundary faces
+        # This can happen when the interface has no shared nodes
+        if isempty(working_faces)
+            # Build face incidence: face -> Dict(pid => count)
+            region_tets = Dict{Int,Vector{Tuple{Int,NTuple{4,Int}}}}()
+            for (dim, tag) in gmsh.model.getEntities(3)
+                etypes, etags, enodes = gmsh.model.mesh.getElements(dim, tag)
+                for (etype, etag_vec, enode_vec) in zip(etypes, etags, enodes)
+                    if etype != 4; continue; end
+                    for i in 1:length(etag_vec)
+                        base = (i-1)*4
+                        nd = (Int(enode_vec[base+1]), Int(enode_vec[base+2]),
+                              Int(enode_vec[base+3]), Int(enode_vec[base+4]))
+                        push!(get!(region_tets, tag, Vector{Tuple{Int,NTuple{4,Int}}}()), (0, nd))
+                    end
+                end
+            end
+
+            # Build face incidence
+            face_inc = Dict{NTuple{3,Int},Dict{Int,Int}}()
+            tet_faces = ((1,2,3),(1,2,4),(1,3,4),(2,3,4))
+            for (pid, tets) in region_tets
+                for (_, nd) in tets
+                    n = (nd[1], nd[2], nd[3], nd[4])
+                    for f in tet_faces
+                        tri = (n[f[1]], n[f[2]], n[f[3]])
+                        tri_sorted = tuple(sort!(collect(tri))...)
+                        d = get!(face_inc, tri_sorted, Dict{Int,Int}())
+                        d[pid] = get(d, pid, 0) + 1
+                    end
+                end
+            end
+
+            # Extract boundary faces (odd incidence) for our PIDs
+            for (face, pid_counts) in face_inc
+                for (pid, cnt) in pid_counts
+                    if pid == topology.pidA || pid == topology.pidB
+                        if isodd(cnt)
+                            face_vec = [face[1], face[2], face[3]]
+                            push!(get!(working_faces, pid, Vector{Vector{Int}}()), face_vec)
+                        end
+                    end
+                end
+            end
+        end
+
+        ws = RepairWorkspace(
+            mesh_file,
+            working_faces,
+            working_nodes,
+            max_node_id,
+            MeshModification[],
+            0,
+            false,
+            0, 0, 0
+        )
+
+        return ws
+    finally
+        gmsh.finalize()
+    end
 end
 
 """
@@ -406,24 +603,54 @@ end
 Export the modified mesh as a new mesh-like object compatible with write_nastran.
 """
 function export_modified_mesh(ws::RepairWorkspace)
-    # Create new mesh with updated data
-    new_mesh = deepcopy(ws.original_mesh)
-    
-    # Update faces
-    new_mesh.all_pid_surfaces = ws.working_faces
-    
-    # Update nodes
-    new_mesh.nodes = ws.working_nodes
-    
-    # Rebuild face_to_pid map
-    new_mesh.face_to_pid = Dict{Vector{Int}, Int}()
+    # Create a simple mesh structure compatible with write_nastran
+    # Based on the expected structure from write_nas_volume
+    regions = VolumeRegion[]
+
     for (pid, faces) in ws.working_faces
-        for face in faces
-            new_mesh.face_to_pid[face] = pid
+        if isempty(faces)
+            continue
         end
+
+        # Get unique points for this region
+        point_set = Set{Int}()
+        for face_nodes in faces
+            for nid in face_nodes
+                push!(point_set, nid)
+            end
+        end
+
+        points = [ws.working_nodes[nid] for nid in sort(collect(point_set))]
+
+        # Create a mapping from original node IDs to new indices (1-based)
+        nid_to_index = Dict{Int,Int}()
+        for (i, nid) in enumerate(sort(collect(point_set)))
+            nid_to_index[nid] = i
+        end
+
+        # Convert faces to tetrahedra (surface elements)
+        # Create degenerate tetrahedra for surface triangles
+        tetrahedra = NTuple{4,Int}[]
+        for face_nodes in faces
+            if length(face_nodes) == 3
+                # Create a tetrahedron from the triangle using mapped indices
+                # Use the first node as the fourth to make it degenerate but valid
+                n1 = nid_to_index[face_nodes[1]]
+                n2 = nid_to_index[face_nodes[2]]
+                n3 = nid_to_index[face_nodes[3]]
+                push!(tetrahedra, (n1, n2, n3, n1))
+            end
+        end
+
+        region = VolumeRegion(
+            "Region_$pid",
+            points,
+            tetrahedra
+        )
+        push!(regions, region)
     end
-    
-    return new_mesh
+
+    return regions
 end
 
 """
@@ -503,7 +730,144 @@ function delete_interface_face!(ws::RepairWorkspace, pid::Int, face_index::Int)
 end
 
 """
-    verify_mesh_integrity(ws::RepairWorkspace, pidA::Int, pidB::Int) -> Bool
+    analyze_edge_topology(ws::RepairWorkspace, pidA::Int, pidB::Int) -> EdgeTopologyResult
+
+Analyze edge topology for non-manifoldness detection.
+Classifies edges by incidence and location (within PIDs or at interface).
+
+Returns EdgeTopologyResult with detailed analysis.
+"""
+function analyze_edge_topology(ws::RepairWorkspace, pidA::Int, pidB::Int)
+    edge_pid_incidence = Dict{Tuple{Int,Int}, Dict{Int,Int}}()
+
+    # Build edge incidence map
+    for pid in (pidA, pidB)
+        if !haskey(ws.working_faces, pid)
+            @warn "PID $pid not found in workspace during edge analysis"
+            continue
+        end
+
+        faces = ws.working_faces[pid]
+        for face_nodes in faces
+            # Create edges (sorted pairs)
+            edges = [
+                (min(face_nodes[1], face_nodes[2]), max(face_nodes[1], face_nodes[2])),
+                (min(face_nodes[2], face_nodes[3]), max(face_nodes[2], face_nodes[3])),
+                (min(face_nodes[3], face_nodes[1]), max(face_nodes[3], face_nodes[1]))
+            ]
+
+            for edge in edges
+                d = get!(edge_pid_incidence, edge, Dict{Int,Int}())
+                d[pid] = get(d, pid, 0) + 1
+            end
+        end
+    end
+
+    # Analyze edge topology
+    total_edges = length(edge_pid_incidence)
+    boundary_edges = 0    # Incident to 1 face
+    manifold_edges = 0    # Incident to 2 faces
+    nonmanifold_edges = 0 # Incident to >2 faces
+
+    # Categorize non-manifold edges by severity and location
+    nm_within_A = 0      # Non-manifold entirely within PID A
+    nm_within_B = 0      # Non-manifold entirely within PID B
+    nm_interface = 0     # Non-manifold at interface (both PIDs involved)
+    max_incidence = 0
+    worst_edge = nothing
+
+    incidence_histogram = Dict{Int,Int}()  # incidence -> count
+
+    for (edge, perpid) in edge_pid_incidence
+        a_cnt = get(perpid, pidA, 0)
+        b_cnt = get(perpid, pidB, 0)
+        total = a_cnt + b_cnt
+
+        if total == 1
+            boundary_edges += 1
+        elseif total == 2
+            manifold_edges += 1
+        else  # total > 2: non-manifold
+            nonmanifold_edges += 1
+            incidence_histogram[total] = get(incidence_histogram, total, 0) + 1
+
+            # Categorize by location
+            if a_cnt > 0 && b_cnt > 0
+                nm_interface += 1
+            elseif a_cnt > 0
+                nm_within_A += 1
+            else
+                nm_within_B += 1
+            end
+
+            # Track worst case
+            if total > max_incidence
+                max_incidence = total
+                worst_edge = (edge, a_cnt, b_cnt)
+            end
+        end
+    end
+
+    return EdgeTopologyResult(
+        total_edges, boundary_edges, manifold_edges, nonmanifold_edges,
+        nm_within_A, nm_within_B, nm_interface, max_incidence,
+        incidence_histogram, worst_edge
+    )
+end
+
+"""
+    report_edge_topology(result::EdgeTopologyResult, pidA::Int, pidB::Int; verbose::Bool=true)
+
+Generate detailed report of edge topology analysis results.
+"""
+function report_edge_topology(result::EdgeTopologyResult, pidA::Int, pidB::Int; verbose::Bool=true)
+    if !result.has_nonmanifold_edges
+        if verbose
+            println("  ✓ Edge topology analysis: No non-manifold edges detected")
+        end
+        return
+    end
+
+    pct = round(100 * result.nonmanifold_edges / result.total_edges, digits=2)
+
+    println("\n  ⚠ Non-Manifold Topology Detected:")
+    println("    Total edges analyzed: $(result.total_edges)")
+    println("    └─ Boundary (1 face): $(result.boundary_edges)")
+    println("    └─ Manifold (2 faces): $(result.manifold_edges)")
+    println("    └─ NON-MANIFOLD (>2 faces): $(result.nonmanifold_edges) ($pct%)")
+
+    println("\n  Non-Manifold Breakdown:")
+    println("    Interface (both PIDs): $(result.nm_interface)  ← Interface misalignment")
+    println("    Within PID $pidA only:  $(result.nm_within_A)  ← Internal mesh issues")
+    println("    Within PID $pidB only:  $(result.nm_within_B)  ← Internal mesh issues")
+
+    # Show incidence distribution
+    if !isempty(result.incidence_histogram)
+        sorted_inc = sort(collect(result.incidence_histogram))
+        println("\n  Incidence Distribution:")
+        for (inc, count) in sorted_inc
+            println("    $inc faces → $count edges")
+        end
+    end
+
+    # Show worst case
+    if result.worst_edge !== nothing && result.max_incidence > 4
+        e, ac, bc = result.worst_edge
+        println("\n  ⚠ Worst case: Edge $e with $(result.max_incidence) faces (PID A: $ac, PID B: $bc)")
+    end
+
+    # Actionable guidance
+    if result.nm_interface > result.nonmanifold_edges * 0.8
+        println("\n  ✓ Most non-manifold edges at interface - expected during repair")
+    elseif result.has_internal_nonmanifold
+        println("\n  ✗ Non-manifold edges within PIDs - indicates input mesh quality issues")
+    end
+
+    println()  # Blank line for readability
+end
+
+"""
+    verify_mesh_integrity(ws::RepairWorkspace, pidA::Int, pidB::Int; config::MeshIntegrityConfig=MeshIntegrityConfig()) -> Bool
 
 Verify mesh integrity after interface replacement.
 Checks:
@@ -514,15 +878,16 @@ Checks:
 
 Returns true if mesh is valid, false otherwise.
 """
-function verify_mesh_integrity(ws::RepairWorkspace, pidA::Int, pidB::Int)
+function verify_mesh_integrity(ws::RepairWorkspace, pidA::Int, pidB::Int; config::MeshIntegrityConfig=MeshIntegrityConfig())
+    # Phase 1: Basic face validation
     for pid in [pidA, pidB]
         if !haskey(ws.working_faces, pid)
             @error "PID $pid not found in workspace"
             return false
         end
-        
+
         faces = ws.working_faces[pid]
-        
+
         # Check each face
         for (face_idx, face_nodes) in enumerate(faces)
             # Check face has exactly 3 nodes
@@ -530,7 +895,7 @@ function verify_mesh_integrity(ws::RepairWorkspace, pidA::Int, pidB::Int)
                 @error "Face $face_idx in PID $pid has $(length(face_nodes)) nodes (expected 3)"
                 return false
             end
-            
+
             # Check all nodes exist
             for node_id in face_nodes
                 if !haskey(ws.working_nodes, node_id)
@@ -538,158 +903,48 @@ function verify_mesh_integrity(ws::RepairWorkspace, pidA::Int, pidB::Int)
                     return false
                 end
             end
-            
+
             # Check for degenerate triangle (repeated nodes)
             if length(unique(face_nodes)) != 3
                 @error "Face $face_idx in PID $pid has degenerate triangle (repeated nodes)"
                 return false
             end
-            
+
             # Check triangle is not zero-area
             coords = [ws.working_nodes[nid] for nid in face_nodes]
             v1 = (coords[2][1] - coords[1][1], coords[2][2] - coords[1][2], coords[2][3] - coords[1][3])
             v2 = (coords[3][1] - coords[1][1], coords[3][2] - coords[1][2], coords[3][3] - coords[1][3])
-            
+
             nx = v1[2] * v2[3] - v1[3] * v2[2]
             ny = v1[3] * v2[1] - v1[1] * v2[3]
             nz = v1[1] * v2[2] - v1[2] * v2[1]
-            
+
             area = sqrt(nx^2 + ny^2 + nz^2) / 2.0
-            
-            if area < 1e-12
-                @error "Face $face_idx in PID $pid has zero area"
+
+            if area < config.min_triangle_area
+                @error "Face $face_idx in PID $pid has zero area (threshold: $(config.min_triangle_area))"
                 return false
             end
         end
     end
-    
-    # ========================================================================
-    # CRITICAL: Non-Manifold Edge Analysis
-    # ========================================================================
-    # A manifold edge is incident to exactly 1 (boundary) or 2 (interior) faces.
-    # Non-manifold edges (>2 faces) indicate topology problems that prevent
-    # downstream operations like remeshing, offset, or boolean operations.
-    #
-    # Classification:
-    # - Boundary edges (1 face): Normal for surface boundaries
-    # - Manifold edges (2 faces): Normal interior edges
-    # - Non-manifold edges (>2 faces): PROBLEMS - T-junctions, overlaps, etc.
-    #
-    # For interface repair:
-    # - Interface edges: Expected to transition from 1→2 or 2→2 (conforming)
-    # - Non-manifold at interface: Often caused by misaligned meshes
-    # - Non-manifold within PID: Indicates mesh quality issues
-    
-    edge_pid_incidence = Dict{Tuple{Int,Int}, Dict{Int,Int}}()
-    
-    for pid in (pidA, pidB)
-        faces = ws.working_faces[pid]
-        for face_nodes in faces
-            # Create edges (sorted pairs)
-            edges = [
-                (min(face_nodes[1], face_nodes[2]), max(face_nodes[1], face_nodes[2])),
-                (min(face_nodes[2], face_nodes[3]), max(face_nodes[2], face_nodes[3])),
-                (min(face_nodes[3], face_nodes[1]), max(face_nodes[3], face_nodes[1]))
-            ]
-            
-            for edge in edges
-                d = get!(edge_pid_incidence, edge, Dict{Int,Int}())
-                d[pid] = get(d, pid, 0) + 1
-            end
-        end
+
+    # Phase 2: Edge topology analysis for non-manifoldness detection
+    edge_result = analyze_edge_topology(ws, pidA, pidB)
+
+    # Phase 3: Report results
+    if config.verbose_reporting
+        report_edge_topology(edge_result, pidA, pidB; verbose=config.verbose_reporting)
     end
-    
-    # Analyze edge topology
-    total_edges = length(edge_pid_incidence)
-    boundary_edges = 0    # Incident to 1 face
-    manifold_edges = 0    # Incident to 2 faces  
-    nonmanifold_edges = 0 # Incident to >2 faces
-    
-    # Categorize non-manifold edges by severity and location
-    nm_within_A = 0      # Non-manifold entirely within PID A
-    nm_within_B = 0      # Non-manifold entirely within PID B
-    nm_interface = 0     # Non-manifold at interface (both PIDs involved)
-    max_incidence = 0
-    worst_edge = nothing
-    
-    incidence_histogram = Dict{Int,Int}()  # incidence -> count
-    
-    for (edge, perpid) in edge_pid_incidence
-        a_cnt = get(perpid, pidA, 0)
-        b_cnt = get(perpid, pidB, 0)
-        total = a_cnt + b_cnt
-        
-        if total == 1
-            boundary_edges += 1
-        elseif total == 2
-            manifold_edges += 1
-        else  # total > 2: non-manifold
-            nonmanifold_edges += 1
-            incidence_histogram[total] = get(incidence_histogram, total, 0) + 1
-            
-            # Categorize by location
-            if a_cnt > 0 && b_cnt > 0
-                nm_interface += 1
-            elseif a_cnt > 0
-                nm_within_A += 1
-            else
-                nm_within_B += 1
-            end
-            
-            # Track worst case
-            if total > max_incidence
-                max_incidence = total
-                worst_edge = (edge, a_cnt, b_cnt)
-            end
-        end
+
+    # Phase 4: Critical validation
+    if edge_result.has_internal_nonmanifold
+        @warn "Mesh contains internal non-manifold edges within PIDs - this may indicate quality issues"
     end
-    
-    # Report non-manifold topology
-    if nonmanifold_edges > 0
-        pct = round(100 * nonmanifold_edges / total_edges, digits=2)
-        
-        println("\n  ⚠ Non-Manifold Topology Detected:")
-        println("    Total edges analyzed: $total_edges")
-        println("    └─ Boundary (1 face): $boundary_edges")
-        println("    └─ Manifold (2 faces): $manifold_edges")
-        println("    └─ NON-MANIFOLD (>2 faces): $nonmanifold_edges ($pct%)")
-        
-        println("\n  Non-Manifold Breakdown:")
-        println("    Interface (both PIDs): $nm_interface  ← Interface misalignment")
-        println("    Within PID $pidA only:  $nm_within_A  ← Internal mesh issues")
-        println("    Within PID $pidB only:  $nm_within_B  ← Internal mesh issues")
-        
-        # Show incidence distribution
-        if !isempty(incidence_histogram)
-            sorted_inc = sort(collect(incidence_histogram))
-            println("\n  Incidence Distribution:")
-            for (inc, count) in sorted_inc
-                println("    $inc faces → $count edges")
-            end
-        end
-        
-        # Show worst case
-        if worst_edge !== nothing && max_incidence > 4
-            e, ac, bc = worst_edge
-            println("\n  ⚠ Worst case: Edge $e with $max_incidence faces (PID A: $ac, PID B: $bc)")
-        end
-        
-        # Actionable guidance
-        println("\n  Impact: Non-manifold edges may cause:")
-        println("    • Remeshing failures")
-        println("    • Invalid boolean operations")
-        println("    • Incorrect volume calculations")
-        println("    • Visualization artifacts")
-        
-        if nm_interface > nonmanifold_edges * 0.8
-            println("\n  ✓ Most non-manifold edges at interface - expected during repair")
-        elseif nm_within_A > 0 || nm_within_B > 0
-            println("\n  ✗ Non-manifold edges within PIDs - indicates input mesh quality issues")
-        end
-        
-        println()  # Blank line for readability
+
+    if edge_result.max_incidence > config.max_edge_incidence
+        @warn "Some edges have very high incidence ($(edge_result.max_incidence)) which may indicate severe topology issues"
     end
-    
+
     return true
 end
 

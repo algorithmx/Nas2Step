@@ -2,6 +2,8 @@
 # ⚠️  DEPRECATED: This module uses the OLD unidirectional classification system.
 #     Use the new symmetric repair system with export_session_report_json() instead.
 
+using .CoordinateKeys: coordinate_key_float
+
 """
     export_interface_mismatches_json(nas_file::AbstractString, output_file::AbstractString; min_shared::Int=10)
 
@@ -92,9 +94,7 @@ function export_interface_mismatches_json(nas_file::AbstractString, output_file:
         for tri in topo.faces_A; _collect_points!(tri); end
         for tri in topo.faces_B; _collect_points!(tri); end
 
-        # Rounding key for coordinate lookups (shared across helpers)
-        ckey(p::NTuple{3,Float64}) = (round(p[1]; digits=4), round(p[2]; digits=4), round(p[3]; digits=4))
-
+        
         # Helper to serialize a triangle via node IDs
         tri_dict = (t, idx) -> Dict(
             "index" => idx,
@@ -106,7 +106,7 @@ function export_interface_mismatches_json(nas_file::AbstractString, output_file:
         function vertices_node_ids(vertices::Vector{NTuple{3,Float64}}, side::String)
             ids = Int[]
             for v in vertices
-                pair = get(topo.node_key_to_ids, ckey(v), nothing)
+                pair = get(topo.node_key_to_ids, coordinate_key_float(v), nothing)
                 if pair === nothing
                     # If mapping is missing, skip this vertex (should be rare on interface)
                     continue
@@ -222,7 +222,7 @@ function export_interface_mismatches_json(nas_file::AbstractString, output_file:
         function triangles_with_edge(faces::Vector{Triangle}, ek::EdgeKey)
             out = Any[]
             for (idx, tri) in enumerate(faces)
-                tri_keys = Set([ckey(tri.coord1), ckey(tri.coord2), ckey(tri.coord3)])
+                tri_keys = Set([coordinate_key_float(tri.coord1), coordinate_key_float(tri.coord2), coordinate_key_float(tri.coord3)])
                 if ek.node1 in tri_keys && ek.node2 in tri_keys
                     push!(out, tri_dict(tri, idx))
                 end
@@ -368,9 +368,7 @@ function _find_interface_pairs(nas_file::AbstractString; min_shared::Int=10)
             t2c[Int(t)] = (coords[j+1], coords[j+2], coords[j+3])
         end
 
-        # Rounding key
-        ckey(p::NTuple{3,Float64}) = (round(p[1]; digits=4), round(p[2]; digits=4), round(p[3]; digits=4))
-
+        
         # Nodes by volume
         vol_nodes = Dict{Int,Set{NTuple{3,Float64}}}()
         for v in vols
@@ -382,7 +380,7 @@ function _find_interface_pairs(nas_file::AbstractString; min_shared::Int=10)
                     for k in 0:3
                         nid = Int(ev[i+k])
                         if haskey(t2c, nid)
-                            push!(nodes_here, ckey(t2c[nid]))
+                            push!(nodes_here, coordinate_key_float(t2c[nid]))
                         end
                     end
                 end

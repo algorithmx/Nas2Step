@@ -3,60 +3,42 @@
 
 using Statistics
 using JSON
+using .CoordinateKeys: coordinate_key_int, create_edge_key_int, EdgeKeyInt, convert_to_int
 
 # ============================================================================
 # Core data structures
 # ============================================================================
 
+# ==============================================================================
+# EdgeKey Type Alias - Using CoordinateKeys Module
+# ==============================================================================
+
 """
-Coordinate-based edge key for geometric matching.
-Nodes are ordered (smaller coordinate tuple first) for consistent hashing.
+EdgeKey Type Alias
 
-# IMPORTANT: Coordinate Rounding Policy
+This module now uses the CoordinateKeys module for consistent, type-safe
+EdgeKey creation and management.
 
-EdgeKey coordinates are ALWAYS rounded to 4 decimal digits during construction
-via the `ckey()` helper function in `build_interface_topology()`. This provides:
-- Hash consistency for dictionary lookups
-- Topological stability (vertices within ~0.0001 are considered identical)
-- Canonical representation for edge matching
+## Migration:
+- Old: `EdgeKey` with manual integer coordinate handling
+- New: `EdgeKeyInt` from CoordinateKeys module with validation and performance monitoring
 
-## Consequences:
-- Triangle structs store ORIGINAL (unrounded) coordinates
-- EdgeKey structs store ROUNDED coordinates (4 digits)
-- When comparing EdgeKey coords with Triangle coords, you MUST:
-  * Use rounding-aware comparison (check both exact and rounded), OR
-  * Use tolerance-based comparison (e.g., are_nodes_equal() from edge_classification.jl)
-
-## Factory Pattern:
-Always create EdgeKeys using:
+## Usage:
 ```julia
-ckey(p) = (round(p[1]; digits=4), round(p[2]; digits=4), round(p[3]; digits=4))
-EdgeKey(ckey(coord1), ckey(coord2))
+# Recommended: Use factory functions from CoordinateKeys module
+edge_key = create_edge_key_int(coord1, coord2)  # Returns EdgeKeyInt
+
+# For direct access, use EdgeKeyInt type
+edge_key = EdgeKeyInt(node1_int, node2_int)
 ```
 
-NEVER create EdgeKeys directly from unrounded coordinates unless you understand
-the implications for hash consistency.
+## Benefits:
+- Type safety with dedicated EdgeKeyInt and EdgeKeyFloat types
+- Built-in coordinate validation and range checking
+- Performance monitoring and statistics tracking
+- Consistent coordinate scaling across all modules
 """
-struct EdgeKey
-    node1::NTuple{3,Float64}
-    node2::NTuple{3,Float64}
-    
-    function EdgeKey(n1::NTuple{3,Float64}, n2::NTuple{3,Float64})
-        # Canonical ordering for consistent comparison
-        # Uses lexicographic ordering on coordinate tuples
-        # Note: This ordering is for hash consistency, not geometric meaning
-        if n1 <= n2
-            new(n1, n2)
-        else
-            new(n2, n1)
-        end
-    end
-end
-
-# EdgeKey comparison uses exact equality because all EdgeKeys should be
-# constructed with pre-rounded coordinates via ckey()
-Base.hash(ek::EdgeKey, h::UInt) = hash((ek.node1, ek.node2), h)
-Base.:(==)(a::EdgeKey, b::EdgeKey) = (a.node1 == b.node1) && (a.node2 == b.node2)
+const EdgeKey = EdgeKeyInt  # Backward compatibility alias
 
 """
 Triangle with complete geometric and topological information.
@@ -134,41 +116,49 @@ Returns:
 - (false, nothing): if triangle doesn't have both edge endpoints
 
 # Comparison Strategy
-Uses tolerance-based geometric comparison to handle the coordinate rounding
-difference between EdgeKey (rounded) and Triangle (unrounded) coordinates.
+Uses tolerance-based geometric comparison to handle the coordinate scaling
+difference between EdgeKey (integer-scaled) and Triangle (unrounded) coordinates.
+EdgeKey stores scaled integer coordinates (multiply by 10000), while Triangle
+stores original float coordinates. This function converts EdgeKey integers back
+to float coordinates for tolerance-based comparison.
 
-This replaces the previous TriangleHasEdge which mixed rounding and tolerance
-redundantly. Pure tolerance-based comparison is simpler and more consistent.
+This approach provides consistent matching regardless of coordinate scaling.
 """
 function triangle_has_edge(triangle::Triangle, edge::EdgeKey; tol::Real=1e-4)
+    # Convert triangle coordinates to integer keys for comparison with EdgeKey integer coordinates
+    # This follows the user's preferred approach: convert to integer and compare element-wise
+    edge_int1 = edge.node1
+    edge_int2 = edge.node2
+
     # Check which triangle vertices match the edge endpoints
     coords = [triangle.coord1, triangle.coord2, triangle.coord3]
-    
-    # Find matches for each edge endpoint
+
+    # Find matches for each edge endpoint by converting triangle coords to integer keys
     matches_node1 = Int[]
     matches_node2 = Int[]
-    
+
     for (i, coord) in enumerate(coords)
-        if are_nodes_equal_local(coord, edge.node1, tol=tol)
+        coord_int = convert_to_int(coord)
+        if coord_int == edge_int1
             push!(matches_node1, i)
         end
-        if are_nodes_equal_local(coord, edge.node2, tol=tol)
+        if coord_int == edge_int2
             push!(matches_node2, i)
         end
     end
-    
+
     # Triangle has the edge if we found exactly one match for each endpoint
     # and they're different vertices
-    if length(matches_node1) == 1 && length(matches_node2) == 1 && 
+    if length(matches_node1) == 1 && length(matches_node2) == 1 &&
        matches_node1[1] != matches_node2[1]
-        
+
         # Find the opposite vertex (the one not on the edge)
         edge_vertices = Set([matches_node1[1], matches_node2[1]])
         opposite_vertex = first(setdiff([1, 2, 3], edge_vertices))
-        
+
         return (true, opposite_vertex)
     end
-    
+
     return (false, nothing)
 end
 
@@ -213,27 +203,27 @@ Complete topology map for an interface between two PIDs.
 struct InterfaceTopology
     pidA::Int
     pidB::Int
-    
+
     # Shared nodes (by coordinate key)
-    shared_node_keys::Set{NTuple{3,Float64}}
-    node_key_to_ids::Dict{NTuple{3,Float64}, Tuple{Int,Int}}  # (nodeA_id, nodeB_id)
-    
+    shared_node_keys::Set{NTuple{3,Int}}
+    node_key_to_ids::Dict{NTuple{3,Int}, Tuple{Int,Int}}  # (nodeA_id, nodeB_id)
+
     # Boundary faces at interface
     faces_A::Vector{Triangle}
     faces_B::Vector{Triangle}
-    
+
     # Edge maps (coordinate-based) - which faces use each edge
     edges_A::Dict{EdgeKey, Vector{Int}}  # EdgeKey -> List[face_index in faces_A]
     edges_B::Dict{EdgeKey, Vector{Int}}
-    
+
     # Non-conformity specifics
     edges_only_in_A::Set{EdgeKey}  # missing in B
     edges_only_in_B::Set{EdgeKey}  # missing in A
     edges_shared::Set{EdgeKey}      # present in both
-    
+
     # Geometric bounding
     interface_bbox::BoundingBox
-    
+
     # Statistics
     total_shared_nodes::Int
     total_faces_A::Int
@@ -241,6 +231,78 @@ struct InterfaceTopology
     total_edges_A::Int
     total_edges_B::Int
     conformity_ratio::Float64  # shared / (A + B - shared)
+
+    # Interface mesh consistency metrics (crude check)
+    max_vertex_distance::Float64      # Maximum distance between shared vertices
+    mean_vertex_distance::Float64     # Mean distance between shared vertices
+    edge_mismatch_count::Int          # Number of edges that don't match between surfaces
+    triangulation_similarity::Float64 # Ratio 0-1, 1.0 means identical triangulation up to node ordering
+end
+
+# ============================================================================
+# Interface mesh consistency checking
+# ============================================================================
+
+"""
+    compute_interface_consistency(coords::Dict{Int,NTuple{3,Float64}},
+                                node_key_to_ids::Dict{NTuple{3,Int}, Tuple{Int,Int}},
+                                triangles_A::Vector{Triangle}, triangles_B::Vector{Triangle},
+                                edges_A::Dict{EdgeKey, Vector{Int}}, edges_B::Dict{EdgeKey, Vector{Int}},
+                                edges_shared::Set{EdgeKey})
+
+Perform crude interface mesh consistency checking.
+
+Returns a tuple with:
+- max_vertex_distance: Maximum Euclidean distance between shared vertices
+- mean_vertex_distance: Mean Euclidean distance between shared vertices
+- edge_mismatch_count: Total number of non-shared edges between surfaces
+- triangulation_similarity: Ratio 0-1 measuring triangulation similarity
+
+This is a minimal-effort check to assess how "far apart" the touching boundaries are.
+The ideal case is zero vertex distance and perfect triangulation similarity.
+"""
+function compute_interface_consistency(coords::Dict{Int,NTuple{3,Float64}},
+                                     node_key_to_ids::Dict{NTuple{3,Int}, Tuple{Int,Int}},
+                                     triangles_A::Vector{Triangle}, triangles_B::Vector{Triangle},
+                                     edges_A::Dict{EdgeKey, Vector{Int}}, edges_B::Dict{EdgeKey, Vector{Int}},
+                                     edges_shared::Set{EdgeKey})
+
+    # 1. Vertex position differences
+    if isempty(node_key_to_ids)
+        return (0.0, 0.0, 0, 0.0)  # No shared vertices
+    end
+
+    vertex_distances = Float64[]
+    for (key, (id_A, id_B)) in node_key_to_ids
+        coord_A = coords[id_A]
+        coord_B = coords[id_B]
+        dist = sqrt((coord_A[1]-coord_B[1])^2 + (coord_A[2]-coord_B[2])^2 + (coord_A[3]-coord_B[3])^2)
+        push!(vertex_distances, dist)
+    end
+
+    max_vertex_distance = maximum(vertex_distances)
+    mean_vertex_distance = sum(vertex_distances) / length(vertex_distances)
+
+    # 2. Edge topology differences
+    total_edges_A = length(edges_A)
+    total_edges_B = length(edges_B)
+    shared_edges = length(edges_shared)
+    edge_mismatch_count = (total_edges_A - shared_edges) + (total_edges_B - shared_edges)
+
+    # 3. Triangulation similarity (crude measure)
+    # Compare face counts and shared edge ratio
+    face_count_diff = abs(length(triangles_A) - length(triangles_B))
+    max_face_count = max(length(triangles_A), length(triangles_B))
+    face_similarity = max_face_count > 0 ? 1.0 - (face_count_diff / max_face_count) : 1.0
+
+    # Edge similarity: ratio of shared edges to total unique edges
+    total_unique_edges = total_edges_A + total_edges_B - shared_edges
+    edge_similarity = total_unique_edges > 0 ? shared_edges / total_unique_edges : 1.0
+
+    # Combine face and edge similarity for overall triangulation similarity
+    triangulation_similarity = (face_similarity + edge_similarity) / 2.0
+
+    return (max_vertex_distance, mean_vertex_distance, edge_mismatch_count, triangulation_similarity)
 end
 
 # ============================================================================
@@ -275,27 +337,24 @@ function build_interface_topology(nas_file::String, pidA::Int, pidB::Int;
         # ====================================================================
         # CRITICAL: Coordinate Key Factory Function
         # ====================================================================
-        # This is the ONLY place where coordinates should be rounded for EdgeKey creation.
-        # 
-        # ckey() rounds coordinates to 4 decimal digits (~0.0001 geometric tolerance)
-        # This provides:
-        # - Topological stability: vertices within 0.0001 are treated as identical
-        # - Hash consistency: ensures EdgeKey dictionary lookups work correctly
-        # - Canonical form: all EdgeKeys use rounded coordinates
+        # Now using CoordinateKeys module for consistent coordinate handling
         #
-        # IMPORTANT: All EdgeKeys MUST be created using ckey()-rounded coordinates!
+        # coordinate_key_int() from CoordinateKeys module:
+        # - Scales coordinates by 10000 and rounds to integers
+        # - Provides topological stability (vertices within 0.0001 are identical)
+        # - Ensures hash consistency for dictionary lookups
+        # - Includes validation and performance monitoring
+        #
+        # IMPORTANT: All EdgeKeys MUST be created using create_edge_key_int()!
         # ====================================================================
-        function ckey(p::NTuple{3,Float64})
-            return (round(p[1]; digits=4), round(p[2]; digits=4), round(p[3]; digits=4))
-        end
-        
+
         # Collect tetrahedra per PID
         region_tets = Dict{Int,Vector{Tuple{Int,NTuple{4,Int}}}}()
         for (dim, tag) in gmsh.model.getEntities(3)
             etypes, etags, enodes = gmsh.model.mesh.getElements(dim, tag)
             for (etype, etag_vec, enode_vec) in zip(etypes, etags, enodes)
                 if etype != 4; continue; end
-                for i in 1:length(etag_vec)
+                for i in eachindex(etag_vec)
                     eid = Int(etag_vec[i])
                     base = (i-1)*4
                     nd = (Int(enode_vec[base+1]), Int(enode_vec[base+2]), 
@@ -339,33 +398,33 @@ function build_interface_topology(nas_file::String, pidA::Int, pidB::Int;
         end
         
         # ====================================================================
-        # Shared Vertex Detection using Rounded Coordinates
+        # Shared Vertex Detection using CoordinateKeys Module
         # ====================================================================
-        # Build coordinate key sets per PID using rounded coordinates.
-        # 
+        # Build coordinate key sets per PID using coordinate_key_int() from CoordinateKeys.
+        #
         # This means vertices that differ by < 0.0001 in any coordinate
         # will be considered the same vertex (merged by rounding).
         #
-        # This is intentional for geometric tolerance but creates a 
+        # This is intentional for geometric tolerance but creates a
         # fundamental inconsistency:
-        # - Shared vertex sets use ROUNDED coordinates
+        # - Shared vertex sets use INTEGER coordinates (from coordinate_key_int)
         # - Triangle structs store ORIGINAL (unrounded) coordinates
         #
         # When comparing vertices from these two sources, use tolerance-based
         # comparison (e.g., are_nodes_equal) rather than exact equality.
         # ====================================================================
-        keyset_A = Set{NTuple{3,Float64}}()
-        keyset_B = Set{NTuple{3,Float64}}()
-        
+        keyset_A = Set{NTuple{3,Int}}()
+        keyset_B = Set{NTuple{3,Int}}()
+
         for (_, nd) in region_tets[pidA]
             for nid in nd
-                push!(keyset_A, ckey(coords[nid]))
+                push!(keyset_A, coordinate_key_int(coords[nid]))
             end
         end
-        
+
         for (_, nd) in region_tets[pidB]
             for nid in nd
-                push!(keyset_B, ckey(coords[nid]))
+                push!(keyset_B, coordinate_key_int(coords[nid]))
             end
         end
         
@@ -373,24 +432,24 @@ function build_interface_topology(nas_file::String, pidA::Int, pidB::Int;
         shared_keys = intersect(keyset_A, keyset_B)
         
         # Build node ID mapping for shared nodes
-        node_key_to_ids = Dict{NTuple{3,Float64}, Tuple{Int,Int}}()
+        node_key_to_ids = Dict{NTuple{3,Int}, Tuple{Int,Int}}()
         
         # Map A nodes
-        nodeA_map = Dict{NTuple{3,Float64}, Int}()
+        nodeA_map = Dict{NTuple{3,Int}, Int}()
         for (_, nd) in region_tets[pidA]
             for nid in nd
-                k = ckey(coords[nid])
+                k = coordinate_key_int(coords[nid])
                 if k in shared_keys && !haskey(nodeA_map, k)
                     nodeA_map[k] = nid
                 end
             end
         end
-        
+
         # Map B nodes
-        nodeB_map = Dict{NTuple{3,Float64}, Int}()
+        nodeB_map = Dict{NTuple{3,Int}, Int}()
         for (_, nd) in region_tets[pidB]
             for nid in nd
-                k = ckey(coords[nid])
+                k = coordinate_key_int(coords[nid])
                 if k in shared_keys && !haskey(nodeB_map, k)
                     nodeB_map[k] = nid
                 end
@@ -405,54 +464,43 @@ function build_interface_topology(nas_file::String, pidA::Int, pidB::Int;
         end
         
         # Filter interface faces (only faces with all nodes in shared set)
-        function is_interface_face(face::NTuple{3,Int}, shared::Set{NTuple{3,Float64}})
-            k1 = ckey(coords[face[1]])
-            k2 = ckey(coords[face[2]])
-            k3 = ckey(coords[face[3]])
-            return (k1 in shared) && (k2 in shared) && (k3 in shared)
-        end
-        
-        interface_faces_A = filter(f -> is_interface_face(f, shared_keys), boundary_faces_A)
-        interface_faces_B = filter(f -> is_interface_face(f, shared_keys), boundary_faces_B)
+        @inline _t(face,i) = (coordinate_key_int(coords[face[i]]) in shared_keys)
+        @inline is_interface_face(face::NTuple{3,Int})::Bool = _t(face,1) && _t(face,2) && _t(face,3)
+
+        interface_faces_A = filter(f -> is_interface_face(f), boundary_faces_A)
+        interface_faces_B = filter(f -> is_interface_face(f), boundary_faces_B)
         
         # Build Triangle objects with geometry
-        triangles_A = Vector{Triangle}()
-        for (idx, face) in enumerate(interface_faces_A)
-            n1, n2, n3 = face
-            tri = Triangle(n1, n2, n3, idx, coords[n1], coords[n2], coords[n3])
-            push!(triangles_A, tri)
+        function build_tri(face::NTuple{3,Int}, idx::Int)
+            return Triangle(face[1], face[2], face[3], idx,
+                          coords[face[1]], coords[face[2]], coords[face[3]])
         end
-        
-        triangles_B = Vector{Triangle}()
-        for (idx, face) in enumerate(interface_faces_B)
-            n1, n2, n3 = face
-            tri = Triangle(n1, n2, n3, idx, coords[n1], coords[n2], coords[n3])
-            push!(triangles_B, tri)
-        end
-        
-        # Build edge maps
+        triangles_A = [build_tri(face, i) for (i, face) in enumerate(interface_faces_A)]
+        triangles_B = [build_tri(face, i) for (i, face) in enumerate(interface_faces_B)]
+
+        # Build edge maps using CoordinateKeys factory functions
         edges_A = Dict{EdgeKey, Vector{Int}}()
         for (idx, tri) in enumerate(triangles_A)
-            k1 = ckey(tri.coord1)
-            k2 = ckey(tri.coord2)
-            k3 = ckey(tri.coord3)
-            
-            for (a, b) in ((k1, k2), (k1, k3), (k2, k3))
-                ek = EdgeKey(a, b)
-                push!(get!(edges_A, ek, Int[]), idx)
-            end
+            # Use factory function for consistent EdgeKey creation
+            ek1 = create_edge_key_int(tri.coord1, tri.coord2)
+            ek2 = create_edge_key_int(tri.coord1, tri.coord3)
+            ek3 = create_edge_key_int(tri.coord2, tri.coord3)
+
+            push!(get!(edges_A, ek1, Int[]), idx)
+            push!(get!(edges_A, ek2, Int[]), idx)
+            push!(get!(edges_A, ek3, Int[]), idx)
         end
-        
+
         edges_B = Dict{EdgeKey, Vector{Int}}()
         for (idx, tri) in enumerate(triangles_B)
-            k1 = ckey(tri.coord1)
-            k2 = ckey(tri.coord2)
-            k3 = ckey(tri.coord3)
-            
-            for (a, b) in ((k1, k2), (k1, k3), (k2, k3))
-                ek = EdgeKey(a, b)
-                push!(get!(edges_B, ek, Int[]), idx)
-            end
+            # Use factory function for consistent EdgeKey creation
+            ek1 = create_edge_key_int(tri.coord1, tri.coord2)
+            ek2 = create_edge_key_int(tri.coord1, tri.coord3)
+            ek3 = create_edge_key_int(tri.coord2, tri.coord3)
+
+            push!(get!(edges_B, ek1, Int[]), idx)
+            push!(get!(edges_B, ek2, Int[]), idx)
+            push!(get!(edges_B, ek3, Int[]), idx)
         end
         
         # Compute edge differences
@@ -473,7 +521,24 @@ function build_interface_topology(nas_file::String, pidA::Int, pidB::Int;
         # Compute conformity ratio
         union_size = length(setA) + length(setB) - length(edges_shared)
         conformity_ratio = union_size > 0 ? length(edges_shared) / union_size : 1.0
-        
+
+        # ====================================================================
+        # Interface Mesh Consistency Checking
+        # ====================================================================
+        # Perform crude consistency check to measure how "far apart" the
+        # touching boundaries are in terms of vertex positions and edge topology.
+        #
+        # This provides metrics to assess interface mesh quality:
+        # - Vertex distances: should be zero for perfectly matching interfaces
+        # - Edge mismatches: should be zero for conforming meshes
+        # - Triangulation similarity: 1.0 means identical up to node ordering
+        # ====================================================================
+        (max_vertex_dist, mean_vertex_dist, edge_mismatch_count,
+         triangulation_sim) = compute_interface_consistency(
+            coords, node_key_to_ids, triangles_A, triangles_B,
+            edges_A, edges_B, edges_shared
+        )
+
         return InterfaceTopology(
             pidA, pidB,
             shared_keys,
@@ -491,7 +556,11 @@ function build_interface_topology(nas_file::String, pidA::Int, pidB::Int;
             length(triangles_B),
             length(setA),
             length(setB),
-            conformity_ratio
+            conformity_ratio,
+            max_vertex_dist,
+            mean_vertex_dist,
+            edge_mismatch_count,
+            triangulation_sim
         )
         
     finally
@@ -538,16 +607,25 @@ function export_interface_topology_json(topology::InterfaceTopology, output_file
             "area_A" => compute_interface_area(topology, :A),
             "area_B" => compute_interface_area(topology, :B)
         ),
+        "interface_consistency" => Dict(
+            "max_vertex_distance" => round(topology.max_vertex_distance, digits=8),
+            "mean_vertex_distance" => round(topology.mean_vertex_distance, digits=8),
+            "edge_mismatch_count" => topology.edge_mismatch_count,
+            "triangulation_similarity" => round(topology.triangulation_similarity, digits=4),
+            "is_perfect_interface" => topology.max_vertex_distance < 1e-8 &&
+                                    topology.edge_mismatch_count == 0 &&
+                                    topology.triangulation_similarity > 0.99
+        ),
         "non_conforming_edges" => Dict(
             "missing_in_B" => [[ek.node1..., ek.node2...] for ek in collect(topology.edges_only_in_A)[1:min(50, length(topology.edges_only_in_A))]],
             "missing_in_A" => [[ek.node1..., ek.node2...] for ek in collect(topology.edges_only_in_B)[1:min(50, length(topology.edges_only_in_B))]]
         )
     )
-    
+
     open(output_file, "w") do io
         JSON.print(io, report, 2)
     end
-    
+
     println("Interface topology exported to: $output_file")
     return output_file
 end

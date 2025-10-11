@@ -9,6 +9,7 @@ plan_triangle_split, generate_edge_insertion_plan, and generate_repair_plan.
 using Test
 using Nas2Step
 using .Nas2StepTestUtils: ckey
+using Nas2Step: create_edge_key_int
 
 # --- Local helpers for tiny synthetic fixtures ---------------------------------
 
@@ -25,7 +26,7 @@ function build_edges_map(tris::Vector{Triangle})
     for (idx, t) in enumerate(tris)
         k1, k2, k3 = ckey(t.coord1), ckey(t.coord2), ckey(t.coord3)
         for (a, b) in ((k1, k2), (k1, k3), (k2, k3))
-            ek = EdgeKey(a, b)
+            ek = create_edge_key_int(a, b)
             push!(get!(m, ek, Int[]), idx)
         end
     end
@@ -40,7 +41,7 @@ end
               min_b::Float64=0.5, min_a::Float64=0.5) = begin
         EdgeInsertionPlan(
             1,                                 # target_triangle
-            EdgeKey(P1, P2),                   # insert_edge
+            create_edge_key_int(P1, P2),       # insert_edge
             :quad_retriangulation,             # split_type
             NTuple{3,Float64}[],               # new_nodes
             Int[],                             # existing_nodes
@@ -179,8 +180,10 @@ end
 function make_topology(fA::Vector{Triangle}, fB::Vector{Triangle}; pidA::Int=1, pidB::Int=2)
     edgesA = build_edges_map(fA)
     edgesB = build_edges_map(fB)
-    shared = Set{NTuple{3,Float64}}(ckey.(vcat([t.coord1 for t in fA]..., [t.coord2 for t in fA]..., [t.coord3 for t in fA]...)))
-    node_map = Dict{NTuple{3,Float64}, Tuple{Int,Int}}()
+    # Convert to integer coordinates for InterfaceTopology compatibility
+    shared_coords = ckey.(vcat([t.coord1 for t in fA]..., [t.coord2 for t in fA]..., [t.coord3 for t in fA]...))
+    shared = Set{NTuple{3,Int}}(Nas2Step.coordinate_key_int.(shared_coords))
+    node_map = Dict{NTuple{3,Int}, Tuple{Int,Int}}()
     bbox = bbox_from_tris(!isempty(fA) ? fA : fB)
     InterfaceTopology(
         pidA, pidB,
@@ -200,6 +203,7 @@ function make_topology(fA::Vector{Triangle}, fB::Vector{Triangle}; pidA::Int=1, 
         length(edgesA),
         length(edgesB),
         0.0,
+        0.0, 0.0, 0, 1.0  # consistency metrics: max_vertex_dist, mean_vertex_dist, edge_mismatch_count, triangulation_similarity
     )
 end
 
@@ -271,7 +275,7 @@ end
 @testset "Repair Planning - Quad Retriangulation" begin
     @testset "Plan Quad Retriangulation" begin
         quad = [P1, P2, P3, P4]
-        diag = EdgeKey(P1, P4)  # use the P1-P4 diagonal
+        diag = create_edge_key_int(P1, P4)  # use the P1-P4 diagonal
         plan = Nas2Step.plan_quad_retriangulation(quad, diag)
         @test plan !== nothing
         @test plan.type == :quad_retriangulation
@@ -298,7 +302,7 @@ end
 @testset "Repair Planning - Triangle Split" begin
     @testset "Plan Triangle Split" begin
         tri = make_triangle(1, 2, 3, P1, P2, P3; eid=10)
-        edge = EdgeKey(P1, P2)
+        edge = create_edge_key_int(P1, P2)
         plan = Nas2Step.plan_triangle_split(tri, edge)
         @test plan !== nothing
         @test plan.type == :bisect
@@ -310,7 +314,7 @@ end
         @test t[7:9] == P3
 
         # Edge not in triangle -> nothing
-        edge2 = EdgeKey(P1, P4)
+        edge2 = create_edge_key_int(P1, P4)
         @test Nas2Step.plan_triangle_split(tri, edge2) === nothing
     end
 end
@@ -324,7 +328,7 @@ end
             make_triangle(2, 4, 1, P2, P4, P1; eid=2),
         ]
         topo = make_topology(tA, tB)
-        diag_edge = EdgeKey(P1, P4)
+        diag_edge = create_edge_key_int(P1, P4)
         mismatch = EdgeMismatch(
             diag_edge,
             Nas2Step.DIAGONAL,
@@ -353,7 +357,7 @@ end
     @testset "Generate Edge Insertion Plan (diagonal missing info)" begin
         tB = [make_triangle(2, 3, 4, P2, P3, P4; eid=1), make_triangle(2, 4, 1, P2, P4, P1; eid=2)]
         topo = make_topology(Triangle[], tB)
-        diag_edge = EdgeKey(P1, P4)
+        diag_edge = create_edge_key_int(P1, P4)
         mismatch = EdgeMismatch(diag_edge, Nas2Step.DIAGONAL, :A_only, topo.pidB,
                                 NTuple{3,Float64}[], Int[], NTuple{3,Float64}[], Int[], 0.3, 1.0, false)
         cons = make_constraints(1, 2)
@@ -368,7 +372,7 @@ end
     @testset "Generate Edge Insertion Plan (constraint violation)" begin
         tB = [make_triangle(2, 3, 4, P2, P3, P4; eid=1), make_triangle(2, 4, 1, P2, P4, P1; eid=2)]
         topo = make_topology(Triangle[], tB)
-        diag_edge = EdgeKey(P1, P4)
+        diag_edge = create_edge_key_int(P1, P4)
         mismatch = EdgeMismatch(diag_edge, Nas2Step.DIAGONAL, :A_only, topo.pidB,
                                 NTuple{3,Float64}[], Int[], [P1, P2, P3, P4], [1,2], 0.3, 1.0, true)
     # Lock an endpoint node to guarantee a violation regardless of edge set behavior
@@ -382,7 +386,7 @@ end
         # Target side A has the triangle; we need to insert edge P1-P2
         tri = make_triangle(1, 2, 3, P1, P2, P3; eid=10)
         topo = make_topology([tri], Triangle[])
-        tedge = EdgeKey(P1, P2)
+        tedge = create_edge_key_int(P1, P2)
         mismatch = EdgeMismatch(tedge, Nas2Step.T_JUNCTION, :B_only, topo.pidA,
                                 NTuple{3,Float64}[], [1], NTuple{3,Float64}[], Int[], 0.2, 1.0, true)
         cons = make_constraints(1, 2)
@@ -414,10 +418,10 @@ end
         topo = make_topology(tA, tB)
         cons = make_constraints(1, 2)
         # Build classification with one DIAGONAL mismatch missing in B (edges only in A)
-        diag = EdgeKey(P1, P4)
+        diag = create_edge_key_int(P1, P4)
         mismatchB = EdgeMismatch(diag, Nas2Step.DIAGONAL, :A_only, topo.pidB,
                                   NTuple{3,Float64}[], Int[], [P1, P2, P3, P4], [1,2], 0.4, 1.0, true)
-        cls = InterfaceClassification(topo, EdgeMismatch[], [mismatchB], 0, 1, 0, 0, 1, 0, 0.4)
+        cls = InterfaceClassification(topo, EdgeMismatch[], [mismatchB])
 
     plan = Nas2Step.generate_repair_plan(topo, cls, cons; thresholds=Nas2Step.default_thresholds())
         @test plan.repair_direction == :subdivide_B
@@ -435,10 +439,10 @@ end
         topo = make_topology(tA, tB)
         cons = make_constraints(1, 2)
         # Mismatch missing in A (present only in B)
-        m_edge = EdgeKey(P1, P2)
+        m_edge = create_edge_key_int(P1, P2)
         mismatchA = EdgeMismatch(m_edge, Nas2Step.T_JUNCTION, :B_only, topo.pidA,
                                   NTuple{3,Float64}[], [1], NTuple{3,Float64}[], Int[], 0.2, 1.0, true)
-        cls = InterfaceClassification(topo, [mismatchA], EdgeMismatch[], 1, 0, 0, 0, 1, 0, 0.2)
+        cls = InterfaceClassification(topo, [mismatchA], EdgeMismatch[])
 
     plan = Nas2Step.generate_repair_plan(topo, cls, cons; thresholds=Nas2Step.default_thresholds())
         @test plan.repair_direction == :subdivide_A

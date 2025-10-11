@@ -335,89 +335,28 @@ function validate_repairs(
     interface_pair::Tuple{Int,Int};
     thresholds::QualityThresholds = default_thresholds()
 )
-    println("\n" * "="^70)
-    println("Repair Validation")
-    println("="^70)
-    
     all_errors = String[]
     all_warnings = String[]
     all_stats = Dict{String,Any}()
-    
-    # 1. Quality validation
-    println("\n1. Mesh Quality Check...")
+
+    # Run all validations
     quality_result = validate_mesh_quality(ws, thresholds=thresholds)
-    append!(all_errors, quality_result.errors)
-    append!(all_warnings, quality_result.warnings)
-    all_stats["quality"] = quality_result.stats
-    
-    if quality_result.passed
-        println("   ✓ PASSED")
-    else
-        println("   ✗ FAILED ($(length(quality_result.errors)) errors)")
-    end
-    println("     Min angle: $(quality_result.stats["min_angle_global"])°")
-    println("     Max angle: $(quality_result.stats["max_angle_global"])°")
-    println("     Max aspect ratio: $(quality_result.stats["max_aspect_ratio"])")
-    
-    # 2. Manifoldness validation
-    println("\n2. Manifoldness Check...")
     manifold_result = validate_manifoldness(ws)
-    append!(all_errors, manifold_result.errors)
-    append!(all_warnings, manifold_result.warnings)
-    all_stats["manifoldness"] = manifold_result.stats
-    
-    if manifold_result.passed
-        println("   ✓ PASSED")
-    else
-        println("   ✗ FAILED ($(length(manifold_result.errors)) errors)")
-    end
-    println("     Total edges: $(manifold_result.stats["total_edges"])")
-    println("     Boundary edges: $(manifold_result.stats["boundary_edges"])")
-    println("     Non-manifold edges: $(manifold_result.stats["non_manifold_edges"])")
-    
-    # 3. Interface conformity validation
-    println("\n3. Interface Conformity Check...")
     conformity_result = validate_interface_conformity(ws, interface_pair)
+
+    # Collect all results
+    append!(all_errors, quality_result.errors)
+    append!(all_errors, manifold_result.errors)
     append!(all_errors, conformity_result.errors)
+    append!(all_warnings, quality_result.warnings)
+    append!(all_warnings, manifold_result.warnings)
     append!(all_warnings, conformity_result.warnings)
+
+    all_stats["quality"] = quality_result.stats
+    all_stats["manifoldness"] = manifold_result.stats
     all_stats["conformity"] = conformity_result.stats
-    
-    if conformity_result.passed
-        println("   ✓ PASSED")
-    else
-        println("   ✗ FAILED ($(length(conformity_result.errors)) errors)")
-    end
-    println("     Shared edges: $(conformity_result.stats["shared_edges"])")
-    println("     Potential mismatches: $(conformity_result.stats["potential_mismatches"])")
-    
-    # Overall result
-    println("\n" * "="^70)
+
     overall_passed = quality_result.passed && manifold_result.passed && conformity_result.passed
-    
-    if overall_passed
-        println("✓ ALL VALIDATIONS PASSED")
-    else
-        println("✗ VALIDATION FAILED")
-        println("\nErrors: $(length(all_errors))")
-        for err in all_errors[1:min(10, length(all_errors))]
-            println("  • $err")
-        end
-        if length(all_errors) > 10
-            println("  ... and $(length(all_errors)-10) more")
-        end
-    end
-    
-    if !isempty(all_warnings)
-        println("\nWarnings: $(length(all_warnings))")
-        for warn in all_warnings[1:min(5, length(all_warnings))]
-            println("  • $warn")
-        end
-        if length(all_warnings) > 5
-            println("  ... and $(length(all_warnings)-5) more")
-        end
-    end
-    
-    println("="^70)
-    
+
     return ValidationResult(overall_passed, all_errors, all_warnings, all_stats)
 end

@@ -14,6 +14,10 @@ using Main.Nas2StepTestUtils
 import Main: RepairWorkspace, begin_transaction!, commit_transaction!, rollback_transaction!
 import Main: delete_face!, add_face!, add_node!, get_face_by_nodes, get_node_id_by_coords
 
+# Import CoordinateKeys functions for repair_execution.jl
+import Nas2Step.CoordinateKeys
+import Nas2Step: create_edge_key_int
+
 # Define local aliases/types matching what repair_execution.jl expects, then include it
 const NasMesh = Any
 
@@ -88,7 +92,7 @@ end
     new1 = coords_of(ws, [1,2,4])
     new2 = coords_of(ws, [2,3,4])
 
-    p = make_quad_plan(Main.Nas2Step.EdgeKey(ws.working_nodes[1], ws.working_nodes[3]),
+    p = make_quad_plan(create_edge_key_int(ws.working_nodes[1], ws.working_nodes[3]),
                        triA, triB, new1, new2)
 
     plan = RepairPlan((pid, 2), :subdivide_A, [p], 1, 0, 0, 0.0, 0.0, true, String[])
@@ -109,9 +113,9 @@ end
     triA = coords_of(ws, [1,2,3])
     triB = coords_of(ws, [1,3,4])
     fake = (99.9, 99.9, 99.9)  # Ensure missing node coordinate
-    bad1 = make_quad_plan(Main.Nas2Step.EdgeKey(ws.working_nodes[1], ws.working_nodes[3]),
+    bad1 = make_quad_plan(create_edge_key_int(ws.working_nodes[1], ws.working_nodes[3]),
                           triA, triB, coords_of(ws, [1,2,4]), [ws.working_nodes[2], ws.working_nodes[3], fake])
-    bad2 = make_quad_plan(Main.Nas2Step.EdgeKey(ws.working_nodes[5], ws.working_nodes[7]),
+    bad2 = make_quad_plan(create_edge_key_int(ws.working_nodes[5], ws.working_nodes[7]),
                           coords_of(ws,[5,6,7]), coords_of(ws,[5,7,8]),
                           [ws.working_nodes[5], ws.working_nodes[6], fake], coords_of(ws,[6,7,8]))
 
@@ -128,7 +132,7 @@ end
     pid = 1
     triA = coords_of(ws, [1,2,3])
     triB = coords_of(ws, [1,3,4])
-    infeas = make_quad_plan(Main.Nas2Step.EdgeKey(ws.working_nodes[1], ws.working_nodes[3]),
+    infeas = make_quad_plan(create_edge_key_int(ws.working_nodes[1], ws.working_nodes[3]),
                                triA, triB, triA, triB; feasible=false)
     plan = RepairPlan((pid, 2), :subdivide_A, [infeas], 1, 0, 0, 0.0, 0.0, true, String[])
     ok = apply_repair_plan!(ws, plan)

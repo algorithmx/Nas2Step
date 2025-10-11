@@ -1,6 +1,8 @@
 # Repair strategy generation for interface conformity
 # Phase 2: Plan surgical mesh repairs
 
+using .CoordinateKeys: convert_to_float
+
 # ============================================================================
 # Repair plan data structures
 # ============================================================================
@@ -550,14 +552,16 @@ function plan_quad_retriangulation(quad_vertices::Vector{NTuple{3,Float64}}, dia
     end
     
     # The diagonal connects 2 opposite corners
-    corner1 = diagonal_edge.node1
-    corner2 = diagonal_edge.node2
-    
+    # EdgeKey stores integer coordinates, but quad_vertices are float coordinates
+    # Convert EdgeKey integer coordinates back to float for comparison
+    corner1 = convert_to_float(diagonal_edge.node1)
+    corner2 = convert_to_float(diagonal_edge.node2)
+
     # Find the other 2 vertices (not on the diagonal)
     # NOTE: EdgeKey coordinates are rounded to 4 digits, but quad_vertices may not be.
     # We need to check both exact match and rounded match.
     round_coord(c) = (round(c[1], digits=4), round(c[2], digits=4), round(c[3], digits=4))
-    
+
     other_vertices = filter(quad_vertices) do v
         # Not a corner if it matches neither corner1 nor corner2
         not_corner1 = (v != corner1) && (round_coord(v) != corner1)
@@ -611,9 +615,14 @@ function plan_triangle_split(triangle::Triangle, edge_to_insert::EdgeKey)
     # Triangle 1: (edge.node1, edge.node2, opposite)
     # This is essentially just reconfirming the edge exists
     opposite_vertex = opposite_vertex==1 ? triangle.coord1 : (opposite_vertex==2 ? triangle.coord2 : triangle.coord3)
+
+    # Convert EdgeKey integer coordinates back to float for consistency
+    edge_start = convert_to_float(edge_to_insert.node1)
+    edge_end = convert_to_float(edge_to_insert.node2)
+
     new_triangles = [
-        (edge_to_insert.node1[1], edge_to_insert.node1[2], edge_to_insert.node1[3],
-         edge_to_insert.node2[1], edge_to_insert.node2[2], edge_to_insert.node2[3],
+        (edge_start[1], edge_start[2], edge_start[3],
+         edge_end[1], edge_end[2], edge_end[3],
          opposite_vertex[1], opposite_vertex[2], opposite_vertex[3])
     ]
     
@@ -1209,26 +1218,11 @@ function generate_repair_plan_bidirectional(
     end
     
     # Force the opposite direction by temporarily swapping mismatches
-    # Create a new classification with swapped mismatch lists
+    # Create a new classification with swapped mismatch lists (auto-compute statistics)
     cls_swapped = InterfaceClassification(
         topology,
         classification.mismatches_B,  # Swap: now A's list contains B's mismatches
-        classification.mismatches_A,  # Swap: now B's list contains A's mismatches
-        classification.t_junction_count,
-        classification.diagonal_count,
-        classification.refinement_count,
-        classification.quad_mismatch_count,
-        classification.boundary_edge_count,
-        classification.non_manifold_count,
-        classification.unshared_endpoint_count,
-        classification.degenerate_edge_count,
-        classification.source_edge_absent_count,
-        classification.quad_not_found_in_source_count,
-        classification.target_uses_finer_triangulation_count,
-        classification.unknown_count,
-        classification.total_feasible,
-        classification.total_infeasible,
-        classification.average_complexity
+        classification.mismatches_A   # Swap: now B's list contains A's mismatches
     )
     
     plan_B = generate_repair_plan(topology, cls_swapped, constraints, thresholds=thresholds)

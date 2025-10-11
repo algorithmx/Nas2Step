@@ -513,4 +513,175 @@ end
     end
 end
 
+@testset "Mesh Integrity Verification" begin
+    @testset "Basic Mesh Validation" begin
+        ws = Nas2StepTestUtils.create_minimal_workspace()
+        pidA, pidB = collect(keys(ws.working_faces))[1:2]
+
+        # Test successful validation
+        config = Nas2Step.MeshIntegrityConfig()
+        @test Nas2Step.verify_mesh_integrity(ws, pidA, pidB; config=config) == true
+    end
+
+    @testset "Edge Topology Analysis - Simple Mesh" begin
+        ws = Nas2StepTestUtils.create_minimal_workspace()
+        pidA, pidB = collect(keys(ws.working_faces))[1:2]
+
+        # Analyze edge topology
+        result = Nas2Step.analyze_edge_topology(ws, pidA, pidB)
+
+        @test result isa Nas2Step.EdgeTopologyResult
+        @test result.total_edges > 0
+        @test result.boundary_edges >= 0
+        @test result.manifold_edges >= 0
+        @test result.nonmanifold_edges >= 0
+        @test result.max_incidence >= 1
+        @test result.incidence_histogram isa Dict{Int,Int}
+
+        # Basic consistency checks
+        @test result.total_edges == result.boundary_edges + result.manifold_edges + result.nonmanifold_edges
+        @test sum(values(result.incidence_histogram)) == result.nonmanifold_edges
+    end
+
+    @testset "Edge Topology Analysis - Missing PID" begin
+        ws = Nas2StepTestUtils.create_minimal_workspace()
+        valid_pid = first(keys(ws.working_faces))
+        invalid_pid = maximum(keys(ws.working_faces)) + 1000
+
+        # Should handle missing PID gracefully
+        result = Nas2Step.analyze_edge_topology(ws, valid_pid, invalid_pid)
+        @test result isa Nas2Step.EdgeTopologyResult
+        @test result.total_edges >= 0
+    end
+
+    @testset "MeshIntegrityConfig" begin
+        # Test default configuration
+        default_config = Nas2Step.MeshIntegrityConfig()
+        @test default_config.min_triangle_area == 1e-12
+        @test default_config.coordinate_tolerance == 1e-6
+        @test default_config.max_edge_incidence == 10
+        @test default_config.verbose_reporting == true
+
+        # Test custom configuration
+        custom_config = Nas2Step.MeshIntegrityConfig(
+            min_triangle_area=1e-10,
+            coordinate_tolerance=1e-8,
+            max_edge_incidence=20,
+            verbose_reporting=false
+        )
+        @test custom_config.min_triangle_area == 1e-10
+        @test custom_config.coordinate_tolerance == 1e-8
+        @test custom_config.max_edge_incidence == 20
+        @test custom_config.verbose_reporting == false
+    end
+
+    @testset "Edge Topology Result Structure" begin
+        # Test constructor
+        result = Nas2Step.EdgeTopologyResult(
+            100,  # total_edges
+            30,   # boundary_edges
+            60,   # manifold_edges
+            10,   # nonmanifold_edges
+            3,    # nm_within_A
+            2,    # nm_within_B
+            5,    # nm_interface
+            4,    # max_incidence
+            Dict(3 => 7, 4 => 3),  # incidence_histogram
+            ((1,2), 2, 2)  # worst_edge
+        )
+
+        @test result.total_edges == 100
+        @test result.boundary_edges == 30
+        @test result.manifold_edges == 60
+        @test result.nonmanifold_edges == 10
+        @test result.nm_within_A == 3
+        @test result.nm_within_B == 2
+        @test result.nm_interface == 5
+        @test result.max_incidence == 4
+        @test result.incidence_histogram[3] == 7
+        @test result.incidence_histogram[4] == 3
+        @test result.worst_edge == ((1,2), 2, 2)
+
+        # Test boolean flags
+        @test result.has_nonmanifold_edges == true
+        @test result.has_internal_nonmanifold == true
+
+        # Test case with no non-manifold edges
+        clean_result = Nas2Step.EdgeTopologyResult(
+            100, 30, 70, 0, 0, 0, 0, 2, Dict{Int,Int}(), nothing
+        )
+        @test clean_result.has_nonmanifold_edges == false
+        @test clean_result.has_internal_nonmanifold == false
+    end
+
+    @testset "Edge Topology Reporting" begin
+        ws = Nas2StepTestUtils.create_minimal_workspace()
+        pidA, pidB = collect(keys(ws.working_faces))[1:2]
+
+        result = Nas2Step.analyze_edge_topology(ws, pidA, pidB)
+
+        # Test reporting with verbose output (should not throw)
+        @test_nowarn Nas2Step.report_edge_topology(result, pidA, pidB; verbose=true)
+
+        # Test reporting with quiet output
+        @test_nowarn Nas2Step.report_edge_topology(result, pidA, pidB; verbose=false)
+    end
+
+    @testset "Non-Manifold Detection" begin
+        # Create a workspace with intentional non-manifold edges
+        ws = Nas2StepTestUtils.create_minimal_workspace()
+
+        # Get two PIDs and some existing nodes
+        pids = collect(keys(ws.working_faces))[1:2]
+        pidA, pidB = pids
+        node_ids = collect(keys(ws.working_nodes))[1:4]
+
+        Nas2Step.begin_transaction!(ws)
+
+        # Create non-manifold situation by adding faces that share the same edge
+        # Edge (1,2) will be shared by multiple faces
+        base_edge = (node_ids[1], node_ids[2])
+
+        # Add multiple faces to PID A that share the same edge
+        for i in 3:min(6, length(node_ids))
+            face = [base_edge[1], base_edge[2], node_ids[i]]
+            Nas2Step.add_face!(ws, pidA, face)
+        end
+
+        # Add some faces to PID B that also use the same edge
+        if length(node_ids) >= 5
+            for i in 3:4
+                face = [base_edge[1], base_edge[2], node_ids[i]]
+                Nas2Step.add_face!(ws, pidB, face)
+            end
+        end
+
+        Nas2Step.commit_transaction!(ws)
+
+        # Analyze edge topology
+        result = Nas2Step.analyze_edge_topology(ws, pidA, pidB)
+
+        # Should detect non-manifold edges
+        @test result.has_nonmanifold_edges == true
+        @test result.nonmanifold_edges > 0
+        @test result.max_incidence > 2
+
+        # Test reporting with non-manifold edges
+        @test_nowarn Nas2Step.report_edge_topology(result, pidA, pidB; verbose=true)
+    end
+
+    @testset "Configuration Parameters" begin
+        ws = Nas2StepTestUtils.create_minimal_workspace()
+        pidA, pidB = collect(keys(ws.working_faces))[1:2]
+
+        # Test with custom configuration
+        quiet_config = Nas2Step.MeshIntegrityConfig(
+            verbose_reporting=false,
+            max_edge_incidence=3
+        )
+
+        # Should complete successfully with custom config
+        @test Nas2Step.verify_mesh_integrity(ws, pidA, pidB; config=quiet_config) == true
+    end
+end
 

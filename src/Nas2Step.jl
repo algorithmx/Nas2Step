@@ -19,6 +19,12 @@ export classify_interface_mismatches_bidirectional  # Strategic improvement: cla
 export build_boundary_constraints, BoundaryConstraints, check_constraint_violations
 export export_interface_topology_json, export_classification_json, export_constraints_json
 
+# Phase 1: CoordinateKeys Module (Enhanced EdgeKey Management)
+export coordinate_key_int, coordinate_key_float, create_edge_key_int, create_edge_key_float
+export EdgeKeyInt, EdgeKeyFloat, COORD_SCALE, COORD_DIGITS, DEFAULT_TOLERANCE
+export validate_coordinate_range, get_coordinate_key_stats, reset_coordinate_key_stats
+export convert_to_int, convert_to_float, are_coordinate_keys_equal
+
 # Phase 1.0: Vertex Conformity Check (Fundamental Sanity Check)
 export check_vertex_conformity, VertexConformityReport, ConformityLevel
 export print_conformity_report, export_conformity_report_json
@@ -47,14 +53,20 @@ export extract_boundary_loops, normalize_loop, compare_loop_sets
 export compute_triangle_normal, verify_normal_consistency, analyze_normal_distribution
 export BoundaryVerificationReport, verify_boundary_consistency
 
-# Phase 3: Surgical Mesh Repair Execution (disabled pending integration)
-# export RepairWorkspace, create_checkpoint!, begin_transaction!, commit_transaction!, rollback_transaction!
-# export delete_face!, add_face!, add_node!, get_face_by_nodes, get_node_id_by_coords
-# export export_modified_mesh, print_workspace_stats
-# export apply_quad_retriangulation!, apply_edge_insertion_plan!, apply_repair_plan!
-# export execute_repairs_from_json, load_repair_plan_from_json
-# export verify_interface_conformity, compare_conformity, print_conformity_report
-# export print_improvement_report, verify_adjacent_interfaces, export_verification_report
+# Phase 3: Surgical Mesh Repair Execution
+export RepairWorkspace, create_checkpoint!, begin_transaction!, commit_transaction!, rollback_transaction!
+export delete_face!, add_face!, add_node!, get_face_by_nodes, get_node_id_by_coords
+export export_modified_mesh, print_workspace_stats
+export apply_quad_retriangulation!, apply_edge_insertion_plan!, apply_repair_plan!
+export execute_repairs_from_json, load_repair_plan_from_json
+export verify_interface_conformity, compare_conformity, print_conformity_report
+export print_improvement_report, verify_adjacent_interfaces, export_verification_report
+export MeshIntegrityConfig, EdgeTopologyResult, analyze_edge_topology, report_edge_topology
+
+# Phase 5: Repair Orchestration
+export orchestrate_single_interface_repair, orchestrate_multi_interface_repair
+export RepairStrategy, RepairOrchestrationResult, RepairErrorInfo, RepairErrorType
+export get_summary_message, get_detailed_report
 
 include("write_nas.jl")
 
@@ -68,6 +80,7 @@ include("analyze.jl")
 
 include("verify.jl")
 
+include("repair/coordinate_keys.jl")
 include("repair/interface_topology.jl")
 include("repair/geometric_utilities.jl")
 include("repair/interface_conformity_check.jl")

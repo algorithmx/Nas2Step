@@ -16,6 +16,10 @@ import Main: RepairWorkspace, begin_transaction!, commit_transaction!, rollback_
 import Main: delete_face!, add_face!, add_node!, get_face_by_nodes, get_node_id_by_coords
 import Main: export_modified_mesh, print_workspace_stats
 
+# Import CoordinateKeys functions for consistent EdgeKey handling
+import Nas2Step: create_edge_key_int
+import Nas2Step.CoordinateKeys
+
 # Alias package types used by included execution code
 const EdgeKey = Main.Nas2Step.EdgeKey
 
@@ -123,7 +127,7 @@ end
         triB = coords_of(ws, [1,3,4])
         new1 = coords_of(ws, [1,2,4])
         new2 = coords_of(ws, [2,3,4])
-        plan = make_quad_plan(Main.Nas2Step.EdgeKey(ws.working_nodes[1], ws.working_nodes[3]),
+        plan = make_quad_plan(create_edge_key_int(ws.working_nodes[1], ws.working_nodes[3]),
                               triA, triB, new1, new2)
 
         faces_before = length(ws.working_faces[pid])
@@ -142,7 +146,7 @@ end
         triA = coords_of(ws, [1,2,3])
         plan_bad_count = EdgeInsertionPlan(
             0,
-            Main.Nas2Step.EdgeKey(ws.working_nodes[1], ws.working_nodes[3]),
+            create_edge_key_int(ws.working_nodes[1], ws.working_nodes[3]),
             :quad_retriangulation,
             NTuple{3,Float64}[],
             Int[],
@@ -159,7 +163,7 @@ end
         # Wrong plan type throws
         plan_wrong_type = EdgeInsertionPlan(
             0,
-            Main.Nas2Step.EdgeKey(ws.working_nodes[1], ws.working_nodes[3]),
+            create_edge_key_int(ws.working_nodes[1], ws.working_nodes[3]),
             :triangle_split,
             NTuple{3,Float64}[],
             Int[],
@@ -179,7 +183,7 @@ end
         # One of the new triangle vertices uses a non-existent coordinate
         fake = (100.0, 100.0, 100.0)
         new_bad = [ws.working_nodes[1], ws.working_nodes[2], fake]
-        plan = make_quad_plan(Main.Nas2Step.EdgeKey(ws.working_nodes[1], ws.working_nodes[3]),
+        plan = make_quad_plan(create_edge_key_int(ws.working_nodes[1], ws.working_nodes[3]),
                               triA, triB, coords_of(ws, [2,3,4]), new_bad)
 
         begin_transaction!(ws)
@@ -198,12 +202,12 @@ end
         pid = 1
         triA = coords_of(ws, [1,2,3])
         triB = coords_of(ws, [1,3,4])
-        good = make_quad_plan(Main.Nas2Step.EdgeKey(ws.working_nodes[1], ws.working_nodes[3]),
+        good = make_quad_plan(create_edge_key_int(ws.working_nodes[1], ws.working_nodes[3]),
                               triA, triB, coords_of(ws,[1,2,4]), coords_of(ws,[2,3,4]))
-    split = make_split_plan(Main.Nas2Step.EdgeKey(ws.working_nodes[1], ws.working_nodes[2]),
+    split = make_split_plan(create_edge_key_int(ws.working_nodes[1], ws.working_nodes[2]),
                 triA, coords_of(ws,[1,2,4]), coords_of(ws,[2,3,4]); split_type=:bisect)
         # Unknown type should return false
-        unknown = EdgeInsertionPlan(0, Main.Nas2Step.EdgeKey(ws.working_nodes[1], ws.working_nodes[3]), :foobar,
+        unknown = EdgeInsertionPlan(0, create_edge_key_int(ws.working_nodes[1], ws.working_nodes[3]), :foobar,
                                     NTuple{3,Float64}[], Int[], [to_flat(triA), to_flat(triB)],
                                     [to_flat(coords_of(ws,[1,2,4])), to_flat(coords_of(ws,[2,3,4]))],
                                     0.0, 0.0, true, Int[], false, String[], true)
@@ -219,10 +223,10 @@ end
         ws = Nas2StepTestUtils.create_minimal_workspace()
         pid = 1
         # Two independent quads on PID 1: (1,2,3)+(1,3,4) and (5,6,7)+(5,7,8)
-        p1 = make_quad_plan(Main.Nas2Step.EdgeKey(ws.working_nodes[1], ws.working_nodes[3]),
+        p1 = make_quad_plan(create_edge_key_int(ws.working_nodes[1], ws.working_nodes[3]),
                             coords_of(ws,[1,2,3]), coords_of(ws,[1,3,4]),
                             coords_of(ws,[1,2,4]), coords_of(ws,[2,3,4]))
-        p2 = make_quad_plan(Main.Nas2Step.EdgeKey(ws.working_nodes[5], ws.working_nodes[7]),
+        p2 = make_quad_plan(create_edge_key_int(ws.working_nodes[5], ws.working_nodes[7]),
                             coords_of(ws,[5,6,7]), coords_of(ws,[5,7,8]),
                             coords_of(ws,[5,6,8]), coords_of(ws,[6,7,8]))
 
@@ -237,10 +241,10 @@ end
         ws = Nas2StepTestUtils.create_minimal_workspace()
         pid = 1
         # First plan good, second plan uses a fake node coordinate to force failure
-        good = make_quad_plan(Main.Nas2Step.EdgeKey(ws.working_nodes[1], ws.working_nodes[3]),
+        good = make_quad_plan(create_edge_key_int(ws.working_nodes[1], ws.working_nodes[3]),
                               coords_of(ws,[1,2,3]), coords_of(ws,[1,3,4]),
                               coords_of(ws,[1,2,4]), coords_of(ws,[2,3,4]))
-        bad = make_quad_plan(Main.Nas2Step.EdgeKey(ws.working_nodes[5], ws.working_nodes[7]),
+        bad = make_quad_plan(create_edge_key_int(ws.working_nodes[5], ws.working_nodes[7]),
                              coords_of(ws,[5,6,7]), coords_of(ws,[5,7,8]),
                              [ws.working_nodes[5], ws.working_nodes[6], (9.9,9.9,9.9)], coords_of(ws,[6,7,8]))
 
@@ -255,10 +259,10 @@ end
         pid = 1
         initial_state = Nas2StepTestUtils.capture_workspace_state(ws)
         # Both plans marked feasible but constructed to fail during execution
-        bad1 = make_quad_plan(Main.Nas2Step.EdgeKey(ws.working_nodes[1], ws.working_nodes[3]),
+        bad1 = make_quad_plan(create_edge_key_int(ws.working_nodes[1], ws.working_nodes[3]),
                               coords_of(ws,[1,2,3]), coords_of(ws,[1,3,4]),
                               [ws.working_nodes[1], ws.working_nodes[2], (99.0,99.0,99.0)], coords_of(ws,[2,3,4]))
-        bad2 = make_quad_plan(Main.Nas2Step.EdgeKey(ws.working_nodes[5], ws.working_nodes[7]),
+        bad2 = make_quad_plan(create_edge_key_int(ws.working_nodes[5], ws.working_nodes[7]),
                               coords_of(ws,[5,6,7]), coords_of(ws,[5,7,8]),
                               [ws.working_nodes[5], ws.working_nodes[6], (77.0,77.0,77.0)], coords_of(ws,[6,7,8]))
 
@@ -274,7 +278,7 @@ end
         pid = 1
         triA = coords_of(ws, [1,2,3])
         triB = coords_of(ws, [1,3,4])
-    infeas = EdgeInsertionPlan(0, Main.Nas2Step.EdgeKey(ws.working_nodes[1], ws.working_nodes[3]), :quad_retriangulation,
+    infeas = EdgeInsertionPlan(0, create_edge_key_int(ws.working_nodes[1], ws.working_nodes[3]), :quad_retriangulation,
                                    NTuple{3,Float64}[], Int[], [to_flat(triA), to_flat(triB)], [to_flat(triA), to_flat(triB)],
                                    0.0, 0.0, true, Int[], false, String[], false)  # is_feasible=false
         plan = RepairPlan((pid, 2), :subdivide_A, [infeas], 1, 0, 0, 0.0, 0.0, true, String[])
@@ -295,7 +299,7 @@ end
         fake_pid = 999
         triA = coords_of(ws, [1,2,3])
         triB = coords_of(ws, [1,3,4])
-    p = make_quad_plan(Main.Nas2Step.EdgeKey(ws.working_nodes[1], ws.working_nodes[3]),
+    p = make_quad_plan(create_edge_key_int(ws.working_nodes[1], ws.working_nodes[3]),
                               triA, triB, coords_of(ws,[1,2,4]), coords_of(ws,[2,3,4]))
         plan = RepairPlan((fake_pid, 2), :subdivide_A, [p], 1, 0, 0, 0.0, 0.0, true, String[])
 

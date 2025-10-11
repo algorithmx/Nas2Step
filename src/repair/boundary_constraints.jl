@@ -1,6 +1,9 @@
 # Boundary constraint identification for safe interface repair
 # Phase 1.3: Identify boundaries that must NOT be modified
 
+# Import CoordinateKeys module for consistent EdgeKey handling
+using .CoordinateKeys: create_edge_key_int, EdgeKeyInt, convert_to_int, convert_to_float
+
 # ============================================================================
 # Boundary constraint structures
 # ============================================================================
@@ -131,14 +134,18 @@ function build_boundary_constraints(nas_file::String, pidA::Int, pidB::Int;
         edge_to_pids = Dict{EdgeKey,Set{Int}}()
         for (pid, faces) in boundary_faces
             for face in faces
-                k1 = ckey(coords[face[1]])
-                k2 = ckey(coords[face[2]])
-                k3 = ckey(coords[face[3]])
-                
-                for (a, b) in ((k1, k2), (k1, k3), (k2, k3))
-                    ek = EdgeKey(a, b)
-                    push!(get!(edge_to_pids, ek, Set{Int}()), pid)
-                end
+                # Use factory function for consistent EdgeKey creation
+                c1 = coords[face[1]]
+                c2 = coords[face[2]]
+                c3 = coords[face[3]]
+
+                ek1 = create_edge_key_int(c1, c2)
+                ek2 = create_edge_key_int(c1, c3)
+                ek3 = create_edge_key_int(c2, c3)
+
+                push!(get!(edge_to_pids, ek1, Set{Int}()), pid)
+                push!(get!(edge_to_pids, ek2, Set{Int}()), pid)
+                push!(get!(edge_to_pids, ek3, Set{Int}()), pid)
             end
         end
         
@@ -209,11 +216,21 @@ function check_constraint_violations(edge::EdgeKey, constraints::BoundaryConstra
     end
     
     # Check if endpoints are locked
-    if edge.node1 in constraints.locked_nodes
-        push!(violations, "Endpoint node1 is locked (corner node)")
-    end
-    if edge.node2 in constraints.locked_nodes
-        push!(violations, "Endpoint node2 is locked (corner node)")
+    # Convert EdgeKey integer coordinates to compare with locked_nodes
+    # Using user's preferred approach: convert to integer and compare element-wise
+    edge_int1 = edge.node1
+    edge_int2 = edge.node2
+
+    # Convert locked_nodes to integer coordinates for comparison
+    # locked_nodes contains float coordinates, so we convert them to integer keys
+    for locked_node in constraints.locked_nodes
+        locked_node_int = convert_to_int(locked_node)
+        if locked_node_int == edge_int1
+            push!(violations, "Endpoint node1 is locked (corner node)")
+        end
+        if locked_node_int == edge_int2
+            push!(violations, "Endpoint node2 is locked (corner node)")
+        end
     end
     
     has_violation = !isempty(violations)
@@ -239,8 +256,8 @@ function export_constraints_json(constraints::BoundaryConstraints, output_file::
         ),
         "details" => Dict(
             "corner_nodes_sample" => [[n...] for n in collect(constraints.corner_nodes)[1:min(20, length(constraints.corner_nodes))]],
-            "external_edges_A_sample" => [[[e.node1...], [e.node2...]] for e in collect(constraints.pidA_external_edges)[1:min(20, length(constraints.pidA_external_edges))]],
-            "external_edges_B_sample" => [[[e.node1...], [e.node2...]] for e in collect(constraints.pidB_external_edges)[1:min(20, length(constraints.pidB_external_edges))]]
+            "external_edges_A_sample" => [[[convert_to_float(e.node1)...], [convert_to_float(e.node2)...]] for e in collect(constraints.pidA_external_edges)[1:min(20, length(constraints.pidA_external_edges))]],
+            "external_edges_B_sample" => [[[convert_to_float(e.node1)...], [convert_to_float(e.node2)...]] for e in collect(constraints.pidB_external_edges)[1:min(20, length(constraints.pidB_external_edges))]]
         )
     )
     

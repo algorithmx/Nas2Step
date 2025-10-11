@@ -4,6 +4,9 @@
 # triangles adjacent to selected edges from the chosen side (:use_A or :use_B),
 # avoiding duplicates and producing basic node mappings and topology.
 
+# Import CoordinateKeys module for consistent EdgeKey handling
+using ..CoordinateKeys: create_edge_key_int, EdgeKeyInt, convert_to_int, coordinate_key_float
+
 """
     generate_unified_interface_mesh(topology, symmetric_mismatches, constraints; thresholds=default_thresholds(), verbose=true)
 
@@ -26,16 +29,13 @@ function generate_unified_interface_mesh(
 
     verbose && println("\n[Phase 5] Generating unified interface mesh (MVP)...")
 
-    # Helper: coordinate key with 4-digit rounding (must match EdgeKey policy)
-    ckey(p::NTuple{3,Float64}) = (round(p[1]; digits=4), round(p[2]; digits=4), round(p[3]; digits=4))
-
     # Accumulators
     unified_tris = Triangle[]
     provenance = Symbol[]
 
     # Duplicate filter: use sorted rounded coords as canonical signature
     function tri_signature(tri::Triangle)
-        pts = [ckey(tri.coord1), ckey(tri.coord2), ckey(tri.coord3)]
+        pts = [coordinate_key_float(tri.coord1), coordinate_key_float(tri.coord2), coordinate_key_float(tri.coord3)]
         sort!(pts)
         return (pts[1], pts[2], pts[3])
     end
@@ -60,7 +60,7 @@ function generate_unified_interface_mesh(
             return false
         end
         # Conservative conflict check: avoid creating non-manifold edges (>2)
-        edges = ((ckey(tri.coord1), ckey(tri.coord2)), (ckey(tri.coord2), ckey(tri.coord3)), (ckey(tri.coord3), ckey(tri.coord1)))
+        edges = ((coordinate_key_float(tri.coord1), coordinate_key_float(tri.coord2)), (coordinate_key_float(tri.coord2), coordinate_key_float(tri.coord3)), (coordinate_key_float(tri.coord3), coordinate_key_float(tri.coord1)))
         for (a, b) in edges
             e = a <= b ? (a, b) : (b, a)
             if get(edge_incidence, e, 0) >= 2
@@ -129,7 +129,7 @@ function generate_unified_interface_mesh(
     for tri in unified_tris
         for c in (tri.coord1, tri.coord2, tri.coord3)
             if !haskey(node_mapping_A, c)
-                key = ckey(c)
+                key = coordinate_key_float(c)
                 if haskey(topology.node_key_to_ids, key)
                     nidA, nidB = topology.node_key_to_ids[key]
                     node_mapping_A[c] = nidA
@@ -146,11 +146,14 @@ function generate_unified_interface_mesh(
     function build_edge_topology(tris::Vector{Triangle})
         edges = Dict{EdgeKey, Vector{Int}}()
         for (i, t) in enumerate(tris)
-            k1 = ckey(t.coord1); k2 = ckey(t.coord2); k3 = ckey(t.coord3)
-            for (a, b) in ((k1, k2), (k2, k3), (k3, k1))
-                ek = EdgeKey(a, b)
-                push!(get!(edges, ek, Int[]), i)
-            end
+            # Use factory function for consistent EdgeKey creation
+            ek1 = create_edge_key_int(t.coord1, t.coord2)
+            ek2 = create_edge_key_int(t.coord2, t.coord3)
+            ek3 = create_edge_key_int(t.coord3, t.coord1)
+
+            push!(get!(edges, ek1, Int[]), i)
+            push!(get!(edges, ek2, Int[]), i)
+            push!(get!(edges, ek3, Int[]), i)
         end
         return edges
     end
@@ -164,7 +167,7 @@ function generate_unified_interface_mesh(
         m = Dict{NTuple{3,Float64},NTuple{3,Float64}}()
         for t in tris
             for c in (t.coord1, t.coord2, t.coord3)
-                k = ckey(c)
+                k = coordinate_key_float(c)
                 if !haskey(m, k)
                     m[k] = c
                 end
@@ -181,16 +184,18 @@ function generate_unified_interface_mesh(
                 push!(boundary_edges, ek)
             end
         end
-        # Build adjacency (rounded node -> neighbors)
-        nbrs = Dict{NTuple{3,Float64}, Vector{NTuple{3,Float64}}}()
+        # Build adjacency (integer node -> neighbors) for consistent integer comparison
+        nbrs = Dict{NTuple{3,Int}, Vector{NTuple{3,Int}}}()
         for ek in boundary_edges
-            a = ek.node1; b = ek.node2
-            push!(get!(nbrs, a, NTuple{3,Float64}[]), b)
-            push!(get!(nbrs, b, NTuple{3,Float64}[]), a)
+            # Use integer coordinates directly from EdgeKey for element-wise comparison
+            a = ek.node1
+            b = ek.node2
+            push!(get!(nbrs, a, NTuple{3,Int}[]), b)
+            push!(get!(nbrs, b, NTuple{3,Int}[]), a)
         end
-        # Traverse closed loops greedily
-        visited = Set{Tuple{NTuple{3,Float64},NTuple{3,Float64}}}()
-        loops = Vector{Vector{NTuple{3,Float64}}}()
+        # Traverse closed loops greedily using integer coordinates
+        visited = Set{Tuple{NTuple{3,Int},NTuple{3,Int}}}()
+        loops_int = Vector{Vector{NTuple{3,Int}}}()
         for start in keys(nbrs)
             if length(nbrs[start]) < 2
                 continue
@@ -198,13 +203,13 @@ function generate_unified_interface_mesh(
             for nxt in nbrs[start]
                 e = start <= nxt ? (start, nxt) : (nxt, start)
                 if e in visited; continue; end
-                path = NTuple{3,Float64}[start]
+                path = NTuple{3,Int}[start]
                 prev = start
                 curr = nxt
                 push!(visited, e)
                 while true
                     push!(path, curr)
-                    neighbors = get(nbrs, curr, NTuple{3,Float64}[])
+                    neighbors = get(nbrs, curr, NTuple{3,Int}[])
                     if isempty(neighbors); break; end
                     next_candidates = filter(x -> x != prev, neighbors)
                     if isempty(next_candidates); break; end
@@ -215,12 +220,19 @@ function generate_unified_interface_mesh(
                     end
                     push!(visited, ed)
                     if nxt2 == start
-                        push!(loops, path)
+                        push!(loops_int, path)
                         break
                     end
                     prev, curr = curr, nxt2
                 end
             end
+        end
+
+        # Convert integer loops to float coordinates for triangle generation
+        loops = Vector{Vector{NTuple{3,Float64}}}()
+        for int_loop in loops_int
+            float_loop = [convert_to_float(node) for node in int_loop]
+            push!(loops, float_loop)
         end
         return loops
     end

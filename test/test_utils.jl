@@ -8,10 +8,11 @@ export ckey
 """
     ckey(p)
 
-Round coordinates to match production code's 8-digit rounding for coordinate keys.
+Round coordinates to match production code's 4-digit precision for coordinate keys.
+This is a convenience alias for Nas2Step.coordinate_key_float to maintain test readability.
 Use this helper in tests to avoid duplicate method definitions across files.
 """
-ckey(p::NTuple{3,Float64}) = (round(p[1]; digits=8), round(p[2]; digits=8), round(p[3]; digits=8))
+ckey(p::NTuple{3,Float64}) = (round(p[1]; digits=4), round(p[2]; digits=4), round(p[3]; digits=4))
 
 """
     create_minimal_workspace()
@@ -37,12 +38,12 @@ function create_minimal_workspace()
         2 => [[2,6,7], [2,7,3]],
     )
 
-    return Main.RepairWorkspace(
+    return Nas2Step.RepairWorkspace(
         "synthetic_cube.nas",
         working_faces,
         working_nodes,
         8,
-        Main.MeshModification[],
+        Nas2Step.MeshModification[],
         0,
         false,
         0, 0, 0,

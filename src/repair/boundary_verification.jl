@@ -10,6 +10,7 @@ Critical for ensuring repaired meshes are suitable for downstream remeshing:
 """
 
 using Statistics
+using .CoordinateKeys: coordinate_key_float
 
 # ============================================================================
 # Boundary Loop Extraction
@@ -39,15 +40,12 @@ loops = extract_boundary_loops(mesh_faces)
 - Filters out degenerate loops (< 3 nodes)
 """
 function extract_boundary_loops(faces::Vector{Triangle})
-    # Helper: coordinate rounding (must match EdgeKey policy)
-    ckey(p::NTuple{3,Float64}) = (round(p[1]; digits=4), round(p[2]; digits=4), round(p[3]; digits=4))
-    
     isempty(faces) && return Vector{Vector{NTuple{3,Float64}}}()
-    
+
     # Step 1: Build edge incidence map
     edge_count = Dict{Tuple{NTuple{3,Float64},NTuple{3,Float64}}, Int}()
     for tri in faces
-        k1, k2, k3 = ckey(tri.coord1), ckey(tri.coord2), ckey(tri.coord3)
+        k1, k2, k3 = coordinate_key_float(tri.coord1), coordinate_key_float(tri.coord2), coordinate_key_float(tri.coord3)
         for (a, b) in ((k1,k2), (k2,k3), (k3,k1))
             e = a <= b ? (a, b) : (b, a)  # Canonical form
             edge_count[e] = get(edge_count, e, 0) + 1

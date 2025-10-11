@@ -7,17 +7,20 @@ Tests EdgeKey, Triangle, BoundingBox, build_interface_topology, and compute_inte
 
 using Test
 
+# Import CoordinateKeys functions for consistent EdgeKey handling
+using Nas2Step: create_edge_key_int, coordinate_key_int
+
 @testset "EdgeKey Construction and Hashing" begin
     @testset "EdgeKey Ordering" begin
         p1 = (0.0, 0.0, 0.0)
         p2 = (1.0, 1.0, 1.0)
-        
+
         # Test that order doesn't matter
-        ek1 = EdgeKey(p1, p2)
-        ek2 = EdgeKey(p2, p1)
+        ek1 = create_edge_key_int(p1, p2)
+        ek2 = create_edge_key_int(p2, p1)
         @test ek1 == ek2
         @test hash(ek1) == hash(ek2)
-        
+
         # Test internal ordering (smaller first)
         @test ek1.node1 <= ek1.node2
     end
@@ -25,16 +28,16 @@ using Test
     @testset "EdgeKey Hash Consistency" begin
         p1 = (0.0, 0.0, 0.0)
         p2 = (1.0, 1.0, 1.0)
-        
-        ek1 = EdgeKey(p1, p2)
-        ek2 = EdgeKey(p1, p2)
-        ek3 = EdgeKey(p2, p1)
-        
+
+        ek1 = create_edge_key_int(p1, p2)
+        ek2 = create_edge_key_int(p1, p2)
+        ek3 = create_edge_key_int(p2, p1)
+
         # All should have the same hash
         @test hash(ek1) == hash(ek2)
         @test hash(ek1) == hash(ek3)
         @test hash(ek2) == hash(ek3)
-        
+
         # And all should be equal
         @test ek1 == ek2
         @test ek1 == ek3
@@ -45,16 +48,16 @@ using Test
         p1 = (0.0, 0.0, 0.0)
         p2 = (1.0, 0.0, 0.0)
         p3 = (0.0, 1.0, 0.0)
-        
-        ek1 = EdgeKey(p1, p2)
-        ek2 = EdgeKey(p1, p3)
-        ek3 = EdgeKey(p2, p3)
-        
+
+        ek1 = create_edge_key_int(p1, p2)
+        ek2 = create_edge_key_int(p1, p3)
+        ek3 = create_edge_key_int(p2, p3)
+
         # Different edges should not be equal
         @test ek1 != ek2
         @test ek1 != ek3
         @test ek2 != ek3
-        
+
         # And should have different hashes (with high probability)
         @test hash(ek1) != hash(ek2)
         @test hash(ek1) != hash(ek3)
@@ -222,7 +225,7 @@ end
         edges_A = Dict{EdgeKey, Vector{Int}}()
         edges_B = Dict{EdgeKey, Vector{Int}}()
         
-        ek1 = EdgeKey((0.0,0.0,0.0), (1.0,0.0,0.0))
+        ek1 = create_edge_key_int((0.0,0.0,0.0), (1.0,0.0,0.0))
         edges_A[ek1] = [1]
         edges_B[ek1] = [1]
         
@@ -239,7 +242,8 @@ end
             edges_A, edges_B,
             edges_only_A, edges_only_B, edges_shared,
             bbox,
-            2, 1, 1, 1, 1, 1.0
+            2, 1, 1, 1, 1, 1.0,
+            0.0, 0.0, 0, 1.0  # consistency metrics: max_vertex_dist, mean_vertex_dist, edge_mismatch_count, triangulation_similarity
         )
         
         # Test basic properties
@@ -257,14 +261,19 @@ end
         # Points that differ by less than tolerance
         p1 = (0.0, 0.0, 0.0)
         p2 = (0.0, 0.0, 1e-9)  # Very close to p1
-        
-        # After rounding in actual code, these might be considered the same
-        # But EdgeKey itself doesn't round, so they'll be different
-        ek1 = EdgeKey(p1, p1)
-        ek2 = EdgeKey(p2, p2)
-        
-        # They should be different without rounding
-        @test ek1 != ek2
+
+        # After scaling to integer coordinates, these both become (0,0,0)
+        # This is the intended behavior of the coordinate scaling system
+        ek1 = create_edge_key_int(p1, p1)
+        ek2 = create_edge_key_int(p2, p2)
+
+        # They should be the same after scaling (both become (0,0,0))
+        @test ek1 == ek2
+
+        # Test with a larger difference that should remain different
+        p3 = (0.0, 0.0, 1e-3)  # Still small, but should scale to (0,0,10)
+        ek3 = create_edge_key_int(p3, p3)
+        @test ek1 != ek3
     end
     
     @testset "Triangle Coordinate Consistency" begin

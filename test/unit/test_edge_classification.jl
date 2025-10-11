@@ -9,6 +9,7 @@ find_quad_for_diagonal, and classify_edge_mismatch.
 using Test
 using Nas2Step
 using .Nas2StepTestUtils: ckey
+using Nas2Step: create_edge_key_int, coordinate_key_int
 
 const Z = 0.0
 
@@ -46,6 +47,7 @@ function make_topology(; pidA::Int=1, pidB::Int=2, facesA::Vector{Triangle}=Tria
         0,
         0,
         1.0,
+        0.0, 0.0, 0, 1.0  # consistency metrics: max_vertex_dist, mean_vertex_dist, edge_mismatch_count, triangulation_similarity
     )
 end
 
@@ -115,7 +117,7 @@ end
 @testset "Edge Classification - Hanging Nodes" begin
     # Edge from (0,0,0) to (10,0,0)
     a = (0.0, 0.0, Z); b = (10.0, 0.0, Z)
-    edge = EdgeKey(ckey(a), ckey(b))
+    edge = create_edge_key_int(a, b)
     nodes = Set([ckey(a), ckey(b), ckey((2.0,0.0,Z)), ckey((7.0,0.0,Z)), ckey((5.0,0.1,Z))])
     hanging = Nas2Step.find_hanging_nodes_on_edge(edge, nodes)
     @test length(hanging) == 2
@@ -133,7 +135,7 @@ end
     t2_target = tri(1,3,4,2,A,C,D)    # ACD (target has AC)
     topo = make_topology(facesA=[t1_source,t2_source], facesB=[t1_target,t2_target])
     # Edge BD exists in A, missing in B
-    ek_bd = EdgeKey(ckey(B), ckey(D))
+    ek_bd = create_edge_key_int(B, D)
     # present_in=:A (edge exists in A), target_pid=pidB (needs to be added to B)
     qverts, to_replace = Nas2Step.find_quad_for_diagonal(ek_bd, topo, :A, topo.pidB)
     @test length(qverts) == 4
@@ -150,13 +152,14 @@ end
 
     @testset "T-Junction (single hanging node)" begin
         # Edge AB, with a midpoint present in shared nodes
-        ek_ab = EdgeKey(ckey(A), ckey(B))
+        ek_ab = create_edge_key_int(A, B)
         # Inject one hanging node into shared set
-        push!(topo_base.shared_node_keys, ckey((0.5,0.0,Z)))
-    m = Nas2Step.classify_edge_mismatch(ek_ab, topo_base, :A)
-    @test m.mismatch_type == Nas2Step.T_JUNCTION
-        @test m.present_in == :B_only
-        @test m.should_be_in == topo_base.pidB
+        push!(topo_base.shared_node_keys, coordinate_key_int((0.5,0.0,Z)))
+        # Test classification from the correct perspective - edge is present in side B
+        m = Nas2Step.classify_edge_mismatch(ek_ab, topo_base, :B)
+        @test m.mismatch_type == Nas2Step.T_JUNCTION
+        @test m.present_in == :A_only
+        @test m.should_be_in == topo_base.pidA
         @test length(m.hanging_nodes) == 1
         @test !isempty(m.affected_triangles)
         @test m.repair_feasible == true
@@ -166,11 +169,12 @@ end
         # New topology to avoid shared mutation
         tri_abx2 = tri(1,2,3,1,A,B,C)
         topo_ref = make_topology(facesB=[tri_abx2])
-        push!(topo_ref.shared_node_keys, ckey((0.25,0.0,Z)))
-        push!(topo_ref.shared_node_keys, ckey((0.75,0.0,Z)))
-        ek_ab = EdgeKey(ckey(A), ckey(B))
-    m = Nas2Step.classify_edge_mismatch(ek_ab, topo_ref, :A)
-    @test m.mismatch_type == Nas2Step.REFINEMENT
+        push!(topo_ref.shared_node_keys, coordinate_key_int((0.25,0.0,Z)))
+        push!(topo_ref.shared_node_keys, coordinate_key_int((0.75,0.0,Z)))
+        ek_ab = create_edge_key_int(A, B)
+        # Test classification from the correct perspective - edge is present in side B
+        m = Nas2Step.classify_edge_mismatch(ek_ab, topo_ref, :B)
+        @test m.mismatch_type == Nas2Step.REFINEMENT
         @test length(m.hanging_nodes) == 2
         @test !isempty(m.affected_triangles)
         @test m.repair_feasible == true
@@ -186,7 +190,7 @@ end
         t2_target = tri(1,3,4,2,A,C,D)    # ACD (target has AC)
         topo_diag = make_topology(facesA=[t1_source, t2_source], facesB=[t1_target, t2_target])
         # Edge BD exists in A, missing in B
-        ek_bd = EdgeKey(ckey(B), ckey(D))
+        ek_bd = create_edge_key_int(B, D)
         # Classify as edge present in A, should be added to B
 	m = Nas2Step.classify_edge_mismatch(ek_bd, topo_diag, :A)
 	@test m.mismatch_type == Nas2Step.DIAGONAL

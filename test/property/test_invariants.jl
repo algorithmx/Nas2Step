@@ -13,6 +13,7 @@ Covers:
 using Test
 using Nas2Step
 using .Nas2StepTestUtils: random_point_3d, ckey, capture_workspace_state, workspace_state_equals, create_minimal_workspace
+using Nas2Step: create_edge_key_int
 
 const Z = 0.0
 
@@ -40,19 +41,23 @@ function make_simple_topology()
     for (i, t) in enumerate((tA1,tA2))
         k1, k2, k3 = ckey(t.coord1), ckey(t.coord2), ckey(t.coord3)
         for (a,b) in ((k1,k2),(k2,k3),(k1,k3))
-            ek = EdgeKey(a,b)
+            ek = create_edge_key_int(a,b)
             push!(get!(edgesA, ek, Int[]), i)
         end
     end
     for (i, t) in enumerate((tB1,tB2))
         k1, k2, k3 = ckey(t.coord1), ckey(t.coord2), ckey(t.coord3)
         for (a,b) in ((k1,k2),(k2,k3),(k1,k3))
-            ek = EdgeKey(a,b)
+            ek = create_edge_key_int(a,b)
             push!(get!(edgesB, ek, Int[]), i)
         end
     end
 
     setA = Set(keys(edgesA)); setB = Set(keys(edgesB)); sharedE = intersect(setA, setB)
+
+    # Compute consistency metrics
+    union_size = length(setA) + length(setB) - length(sharedE)
+    conformity_ratio = union_size > 0 ? length(sharedE) / union_size : 1.0
 
     return InterfaceTopology(
         1, 2,
@@ -69,7 +74,8 @@ function make_simple_topology()
         length(shared),
         2, 2,
         length(setA), length(setB),
-        length(union(setA, setB)) > 0 ? length(sharedE)/length(union(setA,setB)) : 1.0,
+        conformity_ratio,
+        0.0, 0.0, 0, 1.0  # consistency metrics: max_vertex_dist, mean_vertex_dist, edge_mismatch_count, triangulation_similarity
     )
 end
 
@@ -77,8 +83,8 @@ end
     for _ in 1:50
         p1 = ckey(random_point_3d())
         p2 = ckey(random_point_3d())
-        ek1 = EdgeKey(p1, p2)
-        ek2 = EdgeKey(p2, p1)
+        ek1 = create_edge_key_int(p1, p2)
+        ek2 = create_edge_key_int(p2, p1)
         @test ek1 == ek2
         @test hash(ek1) == hash(ek2)
     end

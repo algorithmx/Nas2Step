@@ -72,7 +72,8 @@ function make_test_topology(facesA::Vector{Triangle}, facesB::Vector{Triangle})
         facesA, facesB, edgesA, edgesB,
         edges_only_A, edges_only_B, edges_shared,
         bbox, length(shared), length(facesA), length(facesB),
-        length(edges_shared), length(edges_only_A) + length(edges_only_B), 0.0
+        length(edges_shared), length(edges_only_A) + length(edges_only_B), 0.0,
+        0.0, 0.0, 0, 1.0  # consistency metrics: max_vertex_dist, mean_vertex_dist, edge_mismatch_count, triangulation_similarity
     )
 end
 
